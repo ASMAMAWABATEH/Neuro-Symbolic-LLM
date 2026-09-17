@@ -1,0 +1,25 @@
+# Stage A3 — "True PC latent residual layer" (research plan, Section 7.5)
+#
+# Mirrors the CLI args in experiments/run_stage_a3.py. Wire this up to your
+# config-loading convention once one exists in the repo (this file was an
+# empty placeholder before this change).
+
+model:
+  vocab_size: 256
+  embed_dim: 64
+  ff_dim: 256
+  num_heads: 4
+  seq_len: 32
+
+a3:
+  z_dim: 16          # dimensionality of the latent residual state z^l
+  eta_z: 0.1         # InferenceSGD eta_infer -- the z-settling step size
+  k_values: [1, 2, 4, 8]   # Section 7.5's headline experimental variable
+
+training:
+  lr: 1.0e-3         # AdamW lr for the A3 predictor + write-matrix nodes only
+  num_epochs: 1.0
+  seed: 0
+
+output:
+  results_csv: results/a3_sweep.csv
