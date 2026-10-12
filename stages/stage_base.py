@@ -22,8 +22,6 @@ import yaml
 if TYPE_CHECKING:
     from frozenllm.substrate import FrozenSubstrate
 from metrics.performance import (
-    cross_entropy_loss,
-    kl_to_base,
     mean_forgetting,
     mean_seen_accuracy,
     perplexity,
@@ -240,9 +238,13 @@ def evaluate(
         adapted = substrate.run_with_interception(
             ids, modify_fn=adapter.modify_fn(params), intercept_layers=adapter.layers
         ).logits
-        base_losses.append(float(cross_entropy_loss(base, ids)))
-        losses.append(float(cross_entropy_loss(adapted, ids)))
-        kls.append(float(kl_to_base(base, adapted)))
+        base_losses.append(float(substrate.compute_loss(base, ids, losses=("CE",))))
+        losses.append(float(substrate.compute_loss(adapted, ids, losses=("CE",))))
+        kls.append(
+            float(
+                substrate.compute_loss(adapted, ids, losses=("KL",), base_logits=base)
+            )
+        )
     base_loss, loss = float(np.mean(base_losses)), float(np.mean(losses))
     return {
         "base_loss": base_loss,

@@ -13,13 +13,24 @@ from typing import Any, TypeVar
 import jax
 import jax.numpy as jnp
 
-from frozenllm.substrate import FrozenSubstrate
-
 T = TypeVar("T")
 
 
 def cross_entropy_loss(logits: jax.Array, labels: jax.Array) -> jax.Array:
-    return FrozenSubstrate.compute_loss(logits, labels)
+    """Causal cross-entropy loss with next-token shifting and padding (-100) masking."""
+    shift_logits = logits[:, :-1, :]
+    shift_labels = labels[:, 1:]
+
+    log_probs = jax.nn.log_softmax(shift_logits, axis=-1)
+    mask = shift_labels != -100
+    safe_labels = jnp.where(mask, shift_labels, 0)
+
+    gathered_log_probs = jnp.take_along_axis(
+        log_probs, safe_labels[..., None], axis=-1
+    ).squeeze(-1)
+
+    loss = -jnp.sum(gathered_log_probs * mask) / jnp.maximum(1.0, jnp.sum(mask))
+    return loss
 
 
 def kl_to_base(base_logits: jax.Array, adapted_logits: jax.Array) -> jax.Array:

@@ -103,7 +103,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     adapter = ResidualAdapter(cfg.adapter, arch)
     params = adapter.init_params()
     n_trainable = ResidualAdapter.num_params(params)
-    n_frozen = sum(int(p.numel()) for p in substrate.params.values())
+    n_frozen = sum(p.numel() for p in substrate.params.values())
     log.info(
         "model=%s L=%d d=%d layers=%s rank=%d trainable=%d frozen=%d ratio=%.3e",
         train_cfg.model,
