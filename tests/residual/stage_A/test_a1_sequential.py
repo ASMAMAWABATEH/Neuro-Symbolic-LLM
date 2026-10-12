@@ -56,18 +56,18 @@ def substrate() -> FrozenSubstrate:
     return sub
 
 
-def _domain(name: str, token: int, steps: int) -> Domain:
+def _domain(name: str, token: int, epochs: int = 1, num_blocks: int = 8) -> Domain:
     # A constant-token domain is learnable in a few steps, so training on it
     # must lower its loss; two domains with different tokens compete.
     rng = np.random.default_rng(token)
-    blocks = np.full((8, SEQ), token, dtype=np.int32)
+    blocks = np.full((num_blocks, SEQ), token, dtype=np.int32)
     noise = rng.random(blocks.shape) < 0.1
     blocks[noise] = rng.integers(0, NUM_TOKENS, int(noise.sum()))
     return Domain(
         name=name,
         train_blocks=blocks,
         eval_set=make_eval_set(blocks, BATCH, 1),
-        steps=steps,
+        epochs=epochs,
     )
 
 
@@ -75,7 +75,10 @@ def test_run_sequential_writes_matrix_and_artifacts(
     substrate: FrozenSubstrate, tmp_path: Path
 ) -> None:
     adapter = ResidualAdapter(ResidualConfig(rank=4), substrate.architecture)
-    domains = [_domain("a", 5, 4), _domain("b", 9, 3)]
+    domains = [
+        _domain("a", 5, epochs=1, num_blocks=8),
+        _domain("b", 9, epochs=1, num_blocks=6),
+    ]
     training = TrainingConfig(batch_size=BATCH, learning_rate=1e-2, log_every=1)
 
     with RunWriter(tmp_path, "run") as writer:
@@ -103,6 +106,7 @@ def test_run_sequential_writes_matrix_and_artifacts(
     assert summary["mean_forgetting"][1] == pytest.approx(loss[1, 0] - loss[0, 0])
     assert summary["steps"] == 7
     assert summary["tokens"] == 7 * BATCH * SEQ
+    assert summary["epochs"] == {"a": 1, "b": 1}
 
     run = tmp_path / "run"
     events = [
@@ -110,7 +114,11 @@ def test_run_sequential_writes_matrix_and_artifacts(
     ]
     train = [e for e in events if e["event"] == "train"]
     evals = [e for e in events if e["event"] == "eval"]
+    epoch_events = [e for e in events if e["event"] == "epoch"]
+    assert len(epoch_events) == 2
     assert [e["global_step"] for e in train] == list(range(1, 8))
+    assert [e["epoch"] for e in train] == [1, 1, 1, 1, 1, 1, 1]
+    assert [e["batch"] for e in train] == [1, 2, 3, 4, 1, 2, 3]
     assert {"loss_total", "loss_task", "loss_wd", "step_time", "ppl"} <= set(train[0])
     # lambda_kl = 0: the train objective omits KL, but evaluation still reports it.
     assert all("loss_kl" not in e for e in train)
@@ -160,7 +168,7 @@ def test_run_sequential_logs_only_returned_terms(
             substrate,
             adapter,
             adapter.init_params(),
-            [_domain("a", 5, 2)],
+            [_domain("a", 5, epochs=1, num_blocks=4)],
             task_only,
             None,
             training,
@@ -209,15 +217,28 @@ def test_config_without_layers_key_still_loads(tmp_path: Path) -> None:
     assert cfg.adapter.layers is None
 
 
-def test_steps_override_applies_to_every_domain(runner: Any) -> None:
+def test_epochs_override_applies_to_every_domain(runner: Any) -> None:
     cfg = load_configs(
         REPO_ROOT / "configs" / "stage_A" / "a1_lora_baseline.yaml", A1Config
     )
-    args = runner.parse_args(["--steps", "2", "--rank", "4"])
+    args = runner.parse_args(["--epochs", "2", "--rank", "4"])
     out = runner.apply_overrides(cfg, args)
-    assert out.training.steps == 2
-    assert all(d.steps == 2 for d in out.domains)
+    assert out.training.epochs == 2
+    assert all(d.epochs == 2 for d in out.domains)
     assert out.adapter.rank == 4
+
+
+def test_deprecated_steps_arg_raises_error(runner: Any) -> None:
+    cfg = load_configs(
+        REPO_ROOT / "configs" / "stage_A" / "a1_lora_baseline.yaml", A1Config
+    )
+    args = runner.parse_args(["--steps", "2"])
+    with pytest.raises(ValueError, match="Use --epochs"):
+        runner.apply_overrides(cfg, args)
+
+    args_conflict = runner.parse_args(["--steps", "2", "--epochs", "3"])
+    with pytest.raises(ValueError, match="Cannot specify both"):
+        runner.apply_overrides(cfg, args_conflict)
 
 
 @pytest.mark.parametrize(

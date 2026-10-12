@@ -227,7 +227,7 @@ training:               # → TrainingConfig
   model: gpt2
   seq_len: 128
   batch_size: 8
-  steps: 200            # per domain, unless the domain sets its own
+  epochs: 3         # per domain, unless the domain sets its own
   learning_rate: 1.0e-3
   eval_batches: 8
   log_every: 10
@@ -243,7 +243,7 @@ domains:                # → DomainConfig each; trained in order, names unique
     train_split: "train[:5000]"   # HF slicing
     eval_split: "validation[:500]"
     separator: "\n\n"   # joins rows into one token stream
-    steps: null         # null → training.steps
+    epochs: null        # null → training.epochs
   - name: ledgar        # contracts; same fields
     ...
   - name: scotus        # case law; same fields
@@ -278,9 +278,9 @@ The repo is mounted at `/app` (edits apply without a rebuild); `nsllm-hf-cache` 
 ```bash
 python experiments/run_stage_a1.py --config configs/stage_A/a1_lora_baseline.yaml
 
-# Overrides: rank, model, steps (every domain), output location
+# Overrides: rank, model, epochs (every domain), output location
 python experiments/run_stage_a1.py --config configs/stage_A/a1_lora_baseline.yaml \
-    --rank 8 --steps 20 --output-dir runs --run-name smoke
+    --rank 8 --epochs 1 --output-dir runs --run-name smoke
 ```
 
 > **Docker memory:** the default config exceeds Docker Desktop's ~4 GB VM (exit code 137). For a smoke run, use a smaller copy and run one container at a time:
@@ -291,7 +291,7 @@ python experiments/run_stage_a1.py --config configs/stage_A/a1_lora_baseline.yam
 >     -e 's/^  eval_batches: 8$/  eval_batches: 2/' \
 >     configs/stage_A/a1_lora_baseline.yaml > runs/smoke.yaml
 > docker run --rm -v "$PWD":/app -v nsllm-hf-cache:/root/.cache/huggingface neuro-symbolic-llm \
->     python experiments/run_stage_a1.py --config runs/smoke.yaml --rank 8 --steps 5 --run-name smoke
+>     python experiments/run_stage_a1.py --config runs/smoke.yaml --rank 8 --epochs 1 --run-name smoke
 > ```
 
 ### Run Artifacts

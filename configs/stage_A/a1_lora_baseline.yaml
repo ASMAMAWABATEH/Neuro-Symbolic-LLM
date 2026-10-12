@@ -16,7 +16,7 @@ training:
   model: gpt2
   seq_len: 128
   batch_size: 8
-  steps: 200            # per domain, unless the domain sets its own
+  epochs: 3             # standard adapter fine-tuning baseline (1-3 epochs)
   learning_rate: 1.0e-3
   eval_batches: 8
   log_every: 10

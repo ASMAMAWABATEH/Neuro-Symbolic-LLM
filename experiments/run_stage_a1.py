@@ -43,10 +43,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--model", type=str, default=None)
-    parser.add_argument("--rank", type=int, default=None)
     parser.add_argument(
-        "--steps", type=int, default=None, help="Steps for every domain (smoke runs)."
+        "--rank", type=int, default=None, help="Residual adapter rank override."
     )
+    parser.add_argument(
+        "--epochs", type=int, default=None, help="Epochs for every domain (smoke runs)."
+    )
+    parser.add_argument("--steps", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument(
@@ -78,9 +81,15 @@ def apply_overrides(cfg: RunConfig, args: argparse.Namespace) -> RunConfig:
         training = replace(training, model=args.model)
     if args.output_dir is not None:
         training = replace(training, output_dir=args.output_dir)
+    if args.epochs is not None and args.steps is not None:
+        raise ValueError("Cannot specify both --epochs and --steps. Use --epochs.")
     if args.steps is not None:
-        training = replace(training, steps=args.steps)
-        domains = tuple(replace(d, steps=args.steps) for d in domains)
+        raise ValueError("--steps has been replaced by --epochs. Use --epochs.")
+    if args.epochs is not None:
+        if args.epochs < 0:
+            raise ValueError(f"epochs must be >= 0, got {args.epochs}")
+        training = replace(training, epochs=args.epochs)
+        domains = tuple(replace(d, epochs=args.epochs) for d in domains)
     return replace(cfg, adapter=adapter, training=training, domains=domains)
 
 
@@ -153,7 +162,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 eval_set=make_eval_set(
                     eval_blocks, train_cfg.batch_size, train_cfg.eval_batches
                 ),
-                steps=train_cfg.steps if d.steps is None else d.steps,
+                epochs=train_cfg.epochs if d.epochs is None else d.epochs,
             )
         )
         log.info(
@@ -178,6 +187,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "adapted_layers": list(adapter.layers),
                 "trainable_params": n_trainable,
                 "frozen_params": n_frozen,
+                "epochs": {d.name: d.epochs for d in domains},
             },
         )
         params, summary = run_sequential(

@@ -285,31 +285,7 @@ class FrozenSubstrate:
         return_components: bool = False,
         **kwargs: Any,
     ) -> jax.Array | tuple[jax.Array, dict[str, jax.Array]]:
-        """Centralized loss dispatcher delegating to metrics.performance.
-
-        Dispatches requested loss components to mathematical implementations in
-        `metrics.performance`, validates inputs, and aggregates multiple losses
-        via summation.
-
-        Supported losses:
-            - "CE": Causal cross-entropy loss (default)
-            - "KL": Kullback-Leibler divergence from base model logits
-
-        Args:
-            logits: Adapted model predictions of shape (batch, seq_len, vocab_size).
-            labels: Target token IDs of shape (batch, seq_len).
-            *args: Optional positional loss names (e.g., "CE", "KL").
-            losses: One or more loss identifiers (default: ("CE",)).
-            base_logits: Frozen base model logits of shape (batch, seq_len, vocab_size),
-                required when computing "KL".
-            weights: Optional mapping of loss names to scaling weights (e.g., {"KL": 0.5}).
-            return_components: If True, returns (total_loss, components_dict).
-            **kwargs: Additional keyword arguments (e.g. adapted_logits).
-
-        Returns:
-            Scalar JAX array representing the individual loss or sum of requested losses,
-            or a tuple (total_loss, components_dict) if return_components is True.
-        """
+        """Centralized loss dispatcher delegating to metrics.performance."""
         from metrics.performance import cross_entropy_loss, kl_to_base, perplexity
 
         # Handle case where first argument(s) might be loss name strings

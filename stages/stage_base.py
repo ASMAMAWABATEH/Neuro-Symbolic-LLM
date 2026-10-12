@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
@@ -73,8 +74,8 @@ class TrainingConfig:
     model: str = "gpt2"
     seq_len: int = 128
     batch_size: int = 8
-    # Default steps per domain; a domain's ``steps`` overrides it.
-    steps: int = 200
+    # Default epochs per domain; a domain's ``epochs`` overrides it.
+    epochs: int = 3
     learning_rate: float = 1.0e-3
     eval_batches: int = 8
     log_every: int = 10
@@ -87,8 +88,8 @@ class TrainingConfig:
         for name in ("seq_len", "batch_size", "eval_batches", "log_every"):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}")
-        if self.steps < 0:
-            raise ValueError(f"steps must be >= 0, got {self.steps}")
+        if self.epochs < 0:
+            raise ValueError(f"epochs must be >= 0, got {self.epochs}")
         if not self.learning_rate > 0:
             raise ValueError(f"learning_rate must be > 0, got {self.learning_rate}")
 
@@ -108,17 +109,17 @@ class DomainConfig:
     test_split: str = "test"
     # Joins rows into one stream; use "\n\n" for one-document-per-row datasets.
     separator: str = ""
-    steps: int | None = None
+    epochs: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not DOMAIN_NAME.match(self.name):
             raise ValueError(
                 f"Domain name must match {DOMAIN_NAME.pattern}, got {self.name!r}"
             )
-        if self.steps is not None and (
-            not isinstance(self.steps, int) or self.steps < 0
+        if self.epochs is not None and (
+            not isinstance(self.epochs, int) or self.epochs < 0
         ):
-            raise ValueError(f"Domain {self.name!r}: steps must be >= 0 or null.")
+            raise ValueError(f"Domain {self.name!r}: epochs must be >= 0 or null.")
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> DomainConfig:
@@ -164,12 +165,12 @@ def load_configs(path: Path, objective_cls: type[Any]) -> RunConfig:
 
 @dataclass(frozen=True)
 class Domain:
-    """A domain with its data loaded and its step count resolved."""
+    """A domain with its data loaded and its epoch count resolved."""
 
     name: str
     train_blocks: np.ndarray
     eval_set: tuple[jax.Array, ...]
-    steps: int
+    epochs: int
 
 
 def load_token_blocks(
@@ -206,14 +207,18 @@ def make_eval_set(
 
 
 def batches(blocks: np.ndarray, batch_size: int, seed: int) -> Iterator[jax.Array]:
+    """Yield complete batches for one epoch in deterministic pseudo-random order.
+
+    Discards incomplete trailing batch (drop_last=True) to preserve static
+    JAX array shapes.
+    """
     if len(blocks) < batch_size:
         raise ValueError(f"{len(blocks)} blocks cannot fill batch_size={batch_size}.")
     rng = np.random.default_rng(seed)
-    while True:
-        order = rng.permutation(len(blocks))
-        # The last partial batch is dropped to keep batch shapes static.
-        for i in range(0, len(order) - batch_size + 1, batch_size):
-            yield jnp.asarray(blocks[order[i : i + batch_size]])
+    order = rng.permutation(len(blocks))
+    # The last partial batch is dropped to keep batch shapes static.
+    for i in range(0, len(order) - batch_size + 1, batch_size):
+        yield jnp.asarray(blocks[order[i : i + batch_size]])
 
 
 def base_logits(substrate: FrozenSubstrate, input_ids: jax.Array) -> jax.Array:
@@ -380,38 +385,122 @@ def run_sequential(
     for t, domain in enumerate(domains):
         if t > 0 and training.reset_optimizer:
             opt_state = optimizer.init(params)
-        log.info("task=%d domain=%s steps=%d", t, domain.name, domain.steps)
-        # Per-task seed: batch order is independent of earlier tasks.
-        stream = batches(domain.train_blocks, training.batch_size, training.seed + t)
-        for step in range(1, domain.steps + 1):
-            ids = next(stream)
-            (params, opt_state, terms), step_time = training_step_time(
-                train_step, params, opt_state, ids
+
+        num_epochs = domain.epochs
+        if num_epochs < 0:
+            raise ValueError(
+                f"Domain {domain.name!r}: epochs must be >= 0, got {num_epochs}."
             )
-            global_step += 1
-            tokens += int(ids.size)
-            step_times.append(step_time)
-            scalars = {k: float(v) for k, v in terms.items()}
-            writer.log(
-                "train",
-                task=t,
-                domain=domain.name,
-                step=step,
-                global_step=global_step,
-                tokens=tokens,
-                step_time=step_time,
-                ppl=float(perplexity(scalars["task"])),
-                # Prefixed so the "task" term does not clash with the task index.
-                **{f"loss_{k}": v for k, v in scalars.items()},
+
+        if num_epochs > 0 and len(domain.train_blocks) < training.batch_size:
+            raise ValueError(
+                f"Domain {domain.name!r} has {len(domain.train_blocks)} blocks, "
+                f"which cannot fill batch_size={training.batch_size}."
             )
-            if step % training.log_every == 0 or step in (1, domain.steps):
-                log.info(
-                    "task=%d step=%d %s time=%.3fs",
-                    t,
-                    step,
-                    _fmt_terms(scalars),
-                    step_time,
+
+        batches_per_epoch = (
+            len(domain.train_blocks) // training.batch_size if num_epochs > 0 else 0
+        )
+        total_domain_batches = batches_per_epoch * num_epochs
+        log.info(
+            "task=%d domain=%s epochs=%d batches_per_epoch=%d total_batches=%d",
+            t,
+            domain.name,
+            num_epochs,
+            batches_per_epoch,
+            total_domain_batches,
+        )
+
+        domain_step = 0
+        for epoch in range(1, num_epochs + 1):
+            epoch_start_time = time.time()
+            epoch_step_times: list[float] = []
+            epoch_scalars: list[dict[str, float]] = []
+            epoch_tokens = 0
+            epoch_seed = training.seed + t * 10000 + (epoch - 1)
+            stream = batches(domain.train_blocks, training.batch_size, epoch_seed)
+
+            for batch_idx, ids in enumerate(stream, start=1):
+                domain_step += 1
+                global_step += 1
+                batch_tokens = int(ids.size)
+                tokens += batch_tokens
+                epoch_tokens += batch_tokens
+
+                (params, opt_state, terms), step_time = training_step_time(
+                    train_step, params, opt_state, ids
                 )
+                step_times.append(step_time)
+                epoch_step_times.append(step_time)
+                scalars = {k: float(v) for k, v in terms.items()}
+                epoch_scalars.append(scalars)
+
+                writer.log(
+                    "train",
+                    task=t,
+                    domain=domain.name,
+                    epoch=epoch,
+                    batch=batch_idx,
+                    step=domain_step,
+                    global_step=global_step,
+                    tokens=tokens,
+                    step_time=step_time,
+                    ppl=float(perplexity(scalars["task"])),
+                    # Prefixed so the "task" term does not clash with the task index.
+                    **{f"loss_{k}": v for k, v in scalars.items()},
+                )
+                if domain_step % training.log_every == 0 or domain_step in (
+                    1,
+                    total_domain_batches,
+                ):
+                    log.info(
+                        "task=%d epoch=%d/%d batch=%d/%d step=%d %s time=%.3fs",
+                        t,
+                        epoch,
+                        num_epochs,
+                        batch_idx,
+                        batches_per_epoch,
+                        domain_step,
+                        _fmt_terms(scalars),
+                        step_time,
+                    )
+
+            epoch_duration = float(time.time() - epoch_start_time)
+            if epoch_scalars:
+                mean_terms = {
+                    k: float(np.mean([s[k] for s in epoch_scalars]))
+                    for k in epoch_scalars[0]
+                }
+                epoch_ppl = float(perplexity(mean_terms["task"]))
+                mean_step = float(np.mean(epoch_step_times))
+                writer.log(
+                    "epoch",
+                    task=t,
+                    domain=domain.name,
+                    epoch=epoch,
+                    total_epochs=num_epochs,
+                    global_step=global_step,
+                    batches=len(epoch_scalars),
+                    blocks=len(epoch_scalars) * training.batch_size,
+                    epoch_tokens=epoch_tokens,
+                    tokens=tokens,
+                    epoch_time=epoch_duration,
+                    mean_step_time=mean_step,
+                    ppl=epoch_ppl,
+                    **{f"loss_{k}": v for k, v in mean_terms.items()},
+                )
+                log.info(
+                    "task=%d domain=%s epoch=%d/%d finished: batches=%d %s ppl=%.2f epoch_time=%.3fs",
+                    t,
+                    domain.name,
+                    epoch,
+                    num_epochs,
+                    len(epoch_scalars),
+                    _fmt_terms(mean_terms),
+                    epoch_ppl,
+                    epoch_duration,
+                )
+
         writer.save_checkpoint(
             f"task_{t}_{domain.name}",
             params,
@@ -419,12 +508,14 @@ def run_sequential(
             global_step=global_step,
             task=t,
             domain=domain.name,
-            step=domain.steps,
+            epoch=num_epochs,
+            step=domain_step,
         )
         rows.append(eval_all(t))
 
     summary = summarize(names, init, rows)
     summary.update(
+        epochs={d.name: d.epochs for d in domains},
         steps=global_step,
         tokens=tokens,
         # Exclude the first step, which includes tracing.
