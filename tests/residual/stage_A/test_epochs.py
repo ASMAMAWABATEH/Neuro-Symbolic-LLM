@@ -1,21 +1,4 @@
-"""Unit and integration tests for epoch-based training semantics.
-
-Validates the 14 core requirements:
-1. One epoch consumes every complete batch exactly once.
-2. Two epochs consume the dataset twice.
-3. Trailing incomplete batch is dropped by default.
-4. Invalid dataset size (< batch_size) raises ValueError.
-5. Zero epochs perform zero optimizer updates while preserving eval and checkpoints.
-6. Global update count equals total batches across all domains and epochs.
-7. Domain-specific epoch overrides take effect.
-8. CLI --epochs override applies consistently to all domains.
-9. Optimizer state persists between epochs within a domain.
-10. Optimizer state resets between domains only when reset_optimizer=True.
-11. Adapter parameters update while substrate remains strictly frozen.
-12. Checkpoints contain correct epoch and update counters.
-13. Continual-learning metrics (mean-seen, forgetting, improvement) work correctly.
-14. Batch ordering is reproducible with the same seed and varies with different seeds.
-"""
+"""Unit and integration tests for epoch-based training semantics."""
 
 from __future__ import annotations
 
@@ -37,6 +20,7 @@ from stages.stage_A.a1 import A1Config, a1_objective
 from stages.stage_base import (
     Domain,
     DomainConfig,
+    RunConfig,
     TrainingConfig,
     batches,
     make_eval_set,
@@ -276,8 +260,6 @@ def test_domain_specific_epoch_overrides() -> None:
 
 
 def test_cli_epochs_override_applies_consistently(runner: Any) -> None:
-    from stages.stage_base import RunConfig
-
     cfg = RunConfig(
         adapter=ResidualConfig(),
         objective=A1Config(),

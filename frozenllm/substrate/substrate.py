@@ -27,6 +27,7 @@ from frozenllm.substrate.memory import (
     get_memory_status,
     maybe_reduce_batch_size,
 )
+from metrics.performance import cross_entropy_loss, kl_to_base, perplexity
 
 from .loader import load_tokenizer, load_torchax_model
 from .torchax_backend import (
@@ -285,9 +286,6 @@ class FrozenSubstrate:
         return_components: bool = False,
         **kwargs: Any,
     ) -> jax.Array | tuple[jax.Array, dict[str, jax.Array]]:
-        """Centralized loss dispatcher delegating to metrics.performance."""
-        from metrics.performance import cross_entropy_loss, kl_to_base, perplexity
-
         # Handle case where first argument(s) might be loss name strings
         actual_logits = logits
         actual_labels = labels

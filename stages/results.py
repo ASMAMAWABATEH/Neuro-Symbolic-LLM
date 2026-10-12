@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import pickle
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import IO, Any
 
+import jax
 import numpy as np
 import yaml
 
@@ -147,10 +149,6 @@ class RunWriter:
         **metadata: Any,
     ) -> Path:
         """Save adapter params, optax optimizer state, and training metadata."""
-        import pickle
-
-        import jax
-
         flat: dict[str, Any] = {
             f"params/{outer}/{inner}": np.asarray(leaf)
             for outer, leaves in params.items()
@@ -192,11 +190,6 @@ def load_params(path: Path | str) -> dict[str, dict[str, np.ndarray]]:
 def load_checkpoint(
     path: Path | str,
 ) -> tuple[dict[str, dict[str, np.ndarray]], Any | None, dict[str, Any]]:
-    """Load adapter params, optax optimizer state, and metadata from a checkpoint."""
-    import pickle
-
-    import jax
-
     params: dict[str, dict[str, np.ndarray]] = {}
     opt_leaves: dict[int, np.ndarray] = {}
     treedef = None

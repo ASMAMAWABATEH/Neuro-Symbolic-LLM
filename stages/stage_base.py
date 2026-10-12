@@ -12,7 +12,7 @@ import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
 import jax
 import jax.numpy as jnp
@@ -20,8 +20,12 @@ import numpy as np
 import optax
 import yaml
 
-if TYPE_CHECKING:
-    from frozenllm.substrate import FrozenSubstrate
+try:
+    from datasets import load_dataset
+except (ImportError, RuntimeError):
+    load_dataset = None
+
+from frozenllm.substrate import FrozenSubstrate, identity_modify
 from metrics.performance import (
     mean_forgetting,
     mean_seen_accuracy,
@@ -30,7 +34,7 @@ from metrics.performance import (
 )
 from metrics.representation import loss_improvement
 from residual import AdapterParams, ResidualAdapter, ResidualConfig
-from stages.results import RunWriter
+from stages.results import RunWriter, load_params
 
 SECTIONS = ("adapter", "objective", "training", "domains")
 # Domain names become file names (params/task_<t>_<name>.npz).
@@ -69,8 +73,6 @@ class Objective(Protocol):
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    """Run settings; mirrors the ``training:`` YAML section."""
-
     model: str = "gpt2"
     seq_len: int = 128
     batch_size: int = 8
@@ -165,8 +167,6 @@ def load_configs(path: Path, objective_cls: type[Any]) -> RunConfig:
 
 @dataclass(frozen=True)
 class Domain:
-    """A domain with its data loaded and its epoch count resolved."""
-
     name: str
     train_blocks: np.ndarray
     eval_set: tuple[jax.Array, ...]
@@ -176,8 +176,8 @@ class Domain:
 def load_token_blocks(
     substrate: FrozenSubstrate, domain: DomainConfig, split: str, seq_len: int
 ) -> np.ndarray:
-    from datasets import load_dataset
-
+    if load_dataset is None:
+        raise ImportError("The 'datasets' package is required to load token blocks.")
     if substrate.tokenizer is None:
         raise ValueError("The substrate has no tokenizer.")
     texts = load_dataset(domain.dataset, domain.dataset_config, split=split)[
@@ -207,11 +207,6 @@ def make_eval_set(
 
 
 def batches(blocks: np.ndarray, batch_size: int, seed: int) -> Iterator[jax.Array]:
-    """Yield complete batches for one epoch in deterministic pseudo-random order.
-
-    Discards incomplete trailing batch (drop_last=True) to preserve static
-    JAX array shapes.
-    """
     if len(blocks) < batch_size:
         raise ValueError(f"{len(blocks)} blocks cannot fill batch_size={batch_size}.")
     rng = np.random.default_rng(seed)
@@ -222,9 +217,6 @@ def batches(blocks: np.ndarray, batch_size: int, seed: int) -> Iterator[jax.Arra
 
 
 def base_logits(substrate: FrozenSubstrate, input_ids: jax.Array) -> jax.Array:
-    from frozenllm.substrate import identity_modify
-
-    # No intercept layers: a plain base forward.
     result = substrate.run_with_interception(
         input_ids, modify_fn=identity_modify, intercept_layers=()
     )
@@ -282,9 +274,6 @@ def evaluate_checkpoint(
     batch_size: int = 8,
     eval_batches: int = 8,
 ) -> dict[str, dict[str, float]]:
-    """Evaluate adapter checkpoint weights across domains on the specified split."""
-    from stages.results import load_params
-
     raw: Mapping[str, Mapping[str, Any]] = (
         load_params(checkpoint) if isinstance(checkpoint, str | Path) else checkpoint
     )

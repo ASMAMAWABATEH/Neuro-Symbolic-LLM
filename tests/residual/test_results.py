@@ -7,10 +7,17 @@ from pathlib import Path
 
 import jax.numpy as jnp
 import numpy as np
+import optax
 import pytest
 import yaml
 
-from stages.results import RunWriter, default_run_name, load_params, run_metadata
+from stages.results import (
+    RunWriter,
+    default_run_name,
+    load_checkpoint,
+    load_params,
+    run_metadata,
+)
 
 
 def test_writes_all_artifacts(tmp_path: Path) -> None:
@@ -72,10 +79,6 @@ def test_metadata_and_run_name() -> None:
 
 
 def test_checkpoint_round_trip(tmp_path: Path) -> None:
-    import optax
-
-    from stages.results import load_checkpoint
-
     params = {"layer_7": {"A": jnp.ones((4, 2)), "B": jnp.zeros((2, 4))}}
     optimizer = optax.adam(1e-3)
     opt_state = optimizer.init(params)
