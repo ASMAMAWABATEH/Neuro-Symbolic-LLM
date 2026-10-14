@@ -13,7 +13,8 @@ RUN apt-get update \
 ENV PIP_DEFAULT_TIMEOUT=300 \
     PIP_RETRIES=10 \
     PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu \
-    HF_HOME=/root/.cache/huggingface
+    HF_HOME=/root/.cache/huggingface \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
