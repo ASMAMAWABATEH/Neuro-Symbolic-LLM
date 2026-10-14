@@ -47,7 +47,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--rank", type=int, default=None, help="Residual adapter rank override."
     )
     parser.add_argument(
-        "--epochs", type=int, default=None, help="Epochs for every domain (smoke runs)."
+        "--epochs",
+        "--epoch",
+        dest="epochs",
+        type=int,
+        default=None,
+        help="Epochs for every domain (smoke runs).",
     )
     parser.add_argument("--steps", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--output-dir", type=str, default=None)

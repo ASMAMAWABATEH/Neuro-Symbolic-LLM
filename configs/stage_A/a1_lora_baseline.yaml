@@ -15,7 +15,7 @@ objective:
 training:
   model: gpt2
   seq_len: 128
-  batch_size: 8
+  batch_size: 64
   epochs: 3             # standard adapter fine-tuning baseline (1-3 epochs)
   learning_rate: 1.0e-3
   eval_batches: 8
