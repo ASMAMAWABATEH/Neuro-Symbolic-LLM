@@ -85,6 +85,7 @@ class TrainingConfig:
     # Fresh Adam moments at each domain boundary.
     reset_optimizer: bool = True
     output_dir: str = "runs"
+    jit: bool = True
 
     def __post_init__(self) -> None:
         for name in ("seq_len", "batch_size", "eval_batches", "log_every"):
@@ -94,6 +95,8 @@ class TrainingConfig:
             raise ValueError(f"epochs must be >= 0, got {self.epochs}")
         if not self.learning_rate > 0:
             raise ValueError(f"learning_rate must be > 0, got {self.learning_rate}")
+        if not isinstance(self.jit, bool):
+            raise ValueError(f"jit must be a boolean, got {self.jit!r}")
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> TrainingConfig:
@@ -228,20 +231,29 @@ def evaluate(
     adapter: ResidualAdapter,
     params: AdapterParams,
     eval_batches: Sequence[jax.Array],
+    *,
+    jit: bool = True,
 ) -> dict[str, float]:
-    base_losses, losses, kls = [], [], []
-    for ids in eval_batches:
+    def _eval_step(
+        p: AdapterParams, ids: jax.Array
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
         base = base_logits(substrate, ids)
         adapted = substrate.run_with_interception(
-            ids, modify_fn=adapter.modify_fn(params), intercept_layers=adapter.layers
+            ids, modify_fn=adapter.modify_fn(p), intercept_layers=adapter.layers
         ).logits
-        base_losses.append(float(substrate.compute_loss(base, ids, losses=("CE",))))
-        losses.append(float(substrate.compute_loss(adapted, ids, losses=("CE",))))
-        kls.append(
-            float(
-                substrate.compute_loss(adapted, ids, losses=("KL",), base_logits=base)
-            )
-        )
+        base_loss = substrate.compute_loss(base, ids, losses=("CE",))
+        loss = substrate.compute_loss(adapted, ids, losses=("CE",))
+        kl = substrate.compute_loss(adapted, ids, losses=("KL",), base_logits=base)
+        return base_loss, loss, kl
+
+    eval_step = jax.jit(_eval_step) if jit else _eval_step
+
+    base_losses, losses, kls = [], [], []
+    for ids in eval_batches:
+        b_loss, a_loss, kl = eval_step(params, ids)
+        base_losses.append(float(b_loss))
+        losses.append(float(a_loss))
+        kls.append(float(kl))
     base_loss, loss = float(np.mean(base_losses)), float(np.mean(losses))
     return {
         "base_loss": base_loss,
@@ -273,6 +285,7 @@ def evaluate_checkpoint(
     seq_len: int = 128,
     batch_size: int = 8,
     eval_batches: int = 8,
+    jit: bool = True,
 ) -> dict[str, dict[str, float]]:
     raw: Mapping[str, Mapping[str, Any]] = (
         load_params(checkpoint) if isinstance(checkpoint, str | Path) else checkpoint
@@ -286,7 +299,7 @@ def evaluate_checkpoint(
         split_name = resolve_split(d, split)
         blocks = load_token_blocks(substrate, d, split_name, seq_len)
         eval_set = make_eval_set(blocks, batch_size, eval_batches)
-        results[d.name] = evaluate(substrate, adapter, params, eval_set)
+        results[d.name] = evaluate(substrate, adapter, params, eval_set, jit=jit)
     return results
 
 
@@ -340,7 +353,9 @@ def run_sequential(
     def eval_all(after_task: int) -> dict[str, dict[str, float]]:
         row = {}
         for d in domains:
-            row[d.name] = evaluate(substrate, adapter, params, d.eval_set)
+            row[d.name] = evaluate(
+                substrate, adapter, params, d.eval_set, jit=training.jit
+            )
             writer.log("eval", after_task=after_task, domain=d.name, **row[d.name])
         log.info("eval after_task=%d %s", after_task, _fmt_losses(row))
         return row
@@ -364,6 +379,9 @@ def run_sequential(
         )
         updates, opt_state = optimizer.update(grads, opt_state, params)
         return optax.apply_updates(params, updates), opt_state, terms
+
+    if training.jit:
+        train_step = jax.jit(train_step)
 
     # The optimizer only sees the adapter PyTree; base weights live outside it.
     opt_state = optimizer.init(params)

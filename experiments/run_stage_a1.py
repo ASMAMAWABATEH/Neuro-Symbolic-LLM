@@ -70,6 +70,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Override eval_batches setting.",
     )
+    parser.add_argument(
+        "--no-jit",
+        action="store_true",
+        default=False,
+        help="Disable JAX JIT compilation for training and evaluation.",
+    )
     return parser.parse_args(argv)
 
 
@@ -81,6 +87,8 @@ def apply_overrides(cfg: RunConfig, args: argparse.Namespace) -> RunConfig:
         training = replace(training, model=args.model)
     if args.output_dir is not None:
         training = replace(training, output_dir=args.output_dir)
+    if getattr(args, "no_jit", False):
+        training = replace(training, jit=False)
     if args.epochs is not None and args.steps is not None:
         raise ValueError("Cannot specify both --epochs and --steps. Use --epochs.")
     if args.steps is not None:
@@ -146,6 +154,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             seq_len=train_cfg.seq_len,
             batch_size=train_cfg.batch_size,
             eval_batches=eval_batches,
+            jit=train_cfg.jit,
         )
         print(json.dumps(results, indent=2))
         return 0
@@ -188,6 +197,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "trainable_params": n_trainable,
                 "frozen_params": n_frozen,
                 "epochs": {d.name: d.epochs for d in domains},
+                "jit": train_cfg.jit,
             },
         )
         params, summary = run_sequential(
@@ -213,7 +223,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             test_set = make_eval_set(
                 test_blocks, train_cfg.batch_size, test_eval_batches
             )
-            test_results[d.name] = evaluate(substrate, adapter, params, test_set)
+            test_results[d.name] = evaluate(
+                substrate, adapter, params, test_set, jit=train_cfg.jit
+            )
             writer.log("test", domain=d.name, **test_results[d.name])
         summary["test"] = test_results
         writer.write_json("results.json", summary)

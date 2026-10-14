@@ -127,7 +127,7 @@ input ids ──► FrozenSubstrate ──────────────�
                                    jax.grad w.r.t. adapter only ──► optax.adam
 ```
 
-The step is not JIT-compiled, so CPU training is slow.
+Training steps and evaluation are JIT-compiled with XLA by default (`training.jit: true`), significantly speeding up CPU and accelerator execution. Pass `--no-jit` (or set `jit: false` in YAML) for eager execution when debugging Python-side hooks.
 
 ---
 
