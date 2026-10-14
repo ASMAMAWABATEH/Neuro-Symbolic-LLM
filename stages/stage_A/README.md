@@ -212,7 +212,7 @@ Stages A2–A7 reuse everything except the objective. A new stage needs:
 adapter:                # → ResidualConfig
   rank: 16
   activation: identity  # identity | gelu | relu | tanh
-  alpha: null           # null → scale 1.0, else alpha / rank
+  alpha: 16             # scale = alpha / rank (1.0)
   init_std: null        # null → 1/sqrt(d)
   late_start: null      # null → L//2 + 1
   late_end: null        # null → L - 2
@@ -226,7 +226,7 @@ objective:              # → A1Config
 training:               # → TrainingConfig
   model: gpt2
   seq_len: 128
-  batch_size: 8
+  batch_size: 16
   epochs: 3         # per domain, unless the domain sets its own
   learning_rate: 1.0e-3
   eval_batches: 8
@@ -234,6 +234,7 @@ training:               # → TrainingConfig
   seed: 0
   reset_optimizer: true # fresh Adam moments at each domain boundary
   output_dir: runs
+  jit: true             # JAX XLA JIT compilation enabled
 
 domains:                # → DomainConfig each; trained in order, names unique
   - name: eurlex        # [A-Za-z0-9_.-]+, used in checkpoint file names

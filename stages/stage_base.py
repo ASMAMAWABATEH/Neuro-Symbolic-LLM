@@ -204,8 +204,12 @@ def make_eval_set(
     blocks: np.ndarray, batch_size: int, eval_batches: int
 ) -> tuple[jax.Array, ...]:
     n_eval = min(len(blocks), eval_batches * batch_size)
+    # Ensure static batch shapes for JAX JIT compilation by dropping partial trailing batches.
+    n_full = (n_eval // batch_size) * batch_size
+    if n_full == 0 and len(blocks) > 0:
+        return (jnp.asarray(blocks[:n_eval]),)
     return tuple(
-        jnp.asarray(blocks[i : i + batch_size]) for i in range(0, n_eval, batch_size)
+        jnp.asarray(blocks[i : i + batch_size]) for i in range(0, n_full, batch_size)
     )
 
 
@@ -234,6 +238,15 @@ def evaluate(
     *,
     jit: bool = True,
 ) -> dict[str, float]:
+    if not eval_batches:
+        return {
+            "base_loss": 0.0,
+            "base_ppl": 1.0,
+            "loss": 0.0,
+            "ppl": 1.0,
+            "kl": 0.0,
+        }
+
     def _eval_step(
         p: AdapterParams, ids: jax.Array
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
