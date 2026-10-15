@@ -348,7 +348,7 @@ def test_shipped_yaml_loads_and_rejects_unknown_keys(tmp_path: Path) -> None:
     cfg = load_configs(
         REPO_ROOT / "configs" / "stage_A" / "a1_lora_baseline.yaml", A1Config
     )
-    assert cfg.adapter == ResidualConfig()
+    assert cfg.adapter == ResidualConfig(alpha=16)
     assert cfg.objective == A1Config()
     assert cfg.training.model == "gpt2"
     assert [d.name for d in cfg.domains] == ["eurlex", "ledgar", "scotus"]
