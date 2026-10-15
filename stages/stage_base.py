@@ -203,6 +203,8 @@ def load_token_blocks(
 def make_eval_set(
     blocks: np.ndarray, batch_size: int, eval_batches: int
 ) -> tuple[jax.Array, ...]:
+    if eval_batches < 1:
+        raise ValueError(f"eval_batches must be >= 1, got {eval_batches}")
     n_eval = min(len(blocks), eval_batches * batch_size)
     # Ensure static batch shapes for JAX JIT compilation by dropping partial trailing batches.
     n_full = (n_eval // batch_size) * batch_size

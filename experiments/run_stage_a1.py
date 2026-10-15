@@ -103,6 +103,10 @@ def apply_overrides(cfg: RunConfig, args: argparse.Namespace) -> RunConfig:
             raise ValueError(f"epochs must be >= 0, got {args.epochs}")
         training = replace(training, epochs=args.epochs)
         domains = tuple(replace(d, epochs=args.epochs) for d in domains)
+    if getattr(args, "eval_batches", None) is not None:
+        if args.eval_batches < 1:
+            raise ValueError(f"eval_batches must be >= 1, got {args.eval_batches}")
+        training = replace(training, eval_batches=args.eval_batches)
     return replace(cfg, adapter=adapter, training=training, domains=domains)
 
 
@@ -149,7 +153,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.eval_checkpoint,
             args.split,
         )
-        eval_batches = args.eval_batches or train_cfg.eval_batches
+        eval_batches = (
+            args.eval_batches
+            if args.eval_batches is not None
+            else train_cfg.eval_batches
+        )
         results = evaluate_checkpoint(
             substrate,
             adapter,
@@ -219,7 +227,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         summary["params_unchanged"] = frozen["params_unchanged"]
 
         # Final test-set evaluation across domains for paper-table results
-        test_eval_batches = args.eval_batches or train_cfg.eval_batches
+        test_eval_batches = (
+            args.eval_batches
+            if args.eval_batches is not None
+            else train_cfg.eval_batches
+        )
         test_results = {}
         for d in cfg.domains:
             test_blocks = load_token_blocks(

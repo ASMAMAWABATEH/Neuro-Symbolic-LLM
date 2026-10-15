@@ -260,3 +260,34 @@ def test_invalid_domain_configs_raise(tmp_path: Path, body: str, match: str) -> 
     path.write_text(body)
     with pytest.raises(ValueError, match=match):
         load_configs(path, A1Config)
+
+
+def test_eval_batches_override_applies(runner: Any) -> None:
+    cfg = load_configs(
+        REPO_ROOT / "configs" / "stage_A" / "a1_lora_baseline.yaml", A1Config
+    )
+    args = runner.parse_args(["--eval-batches", "4"])
+    out = runner.apply_overrides(cfg, args)
+    assert out.training.eval_batches == 4
+
+    # None maintains configured value
+    args_none = runner.parse_args([])
+    out_none = runner.apply_overrides(cfg, args_none)
+    assert out_none.training.eval_batches == cfg.training.eval_batches
+
+
+@pytest.mark.parametrize("val", [0, -1, -5])
+def test_eval_batches_rejects_values_below_one(runner: Any, val: int) -> None:
+    cfg = load_configs(
+        REPO_ROOT / "configs" / "stage_A" / "a1_lora_baseline.yaml", A1Config
+    )
+    args = runner.parse_args(["--eval-batches", str(val)])
+    with pytest.raises(ValueError, match="eval_batches must be >= 1"):
+        runner.apply_overrides(cfg, args)
+
+
+@pytest.mark.parametrize("val", [0, -1, -5])
+def test_make_eval_set_rejects_values_below_one(val: int) -> None:
+    blocks = np.zeros((10, 128), dtype=np.int32)
+    with pytest.raises(ValueError, match="eval_batches must be >= 1"):
+        make_eval_set(blocks, batch_size=2, eval_batches=val)
