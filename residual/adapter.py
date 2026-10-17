@@ -16,6 +16,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from frozenllm.substrate.architecture import (
     Architecture,
@@ -205,6 +206,51 @@ class ResidualAdapter:
             (jnp.sum(jnp.square(leaf)) for leaf in jax.tree_util.tree_leaves(params)),
             start=jnp.zeros((), dtype=jnp.float32),
         )
+
+    def validate_params(self, params: Mapping[str, Mapping[str, Any]]) -> None:
+        """Validate that params match the configured adapter layers, keys, and shapes."""
+        expected_layers = {layer_key(idx) for idx in self.layers}
+        actual_layers = set(params.keys())
+        if actual_layers != expected_layers:
+            missing = expected_layers - actual_layers
+            extra = actual_layers - expected_layers
+            details = []
+            if missing:
+                details.append(f"missing layers: {sorted(missing)}")
+            if extra:
+                details.append(f"extra layers: {sorted(extra)}")
+            raise ValueError(
+                f"Checkpoint parameter layers do not match adapter configuration ({', '.join(details)}). "
+                f"Expected layers: {sorted(expected_layers)}, got: {sorted(actual_layers)}"
+            )
+
+        d, r = self.hidden_size, self.config.rank
+        for layer in sorted(expected_layers):
+            layer_dict = params[layer]
+            actual_keys = set(layer_dict.keys())
+            if actual_keys != {"A", "B"}:
+                missing_keys = {"A", "B"} - actual_keys
+                extra_keys = actual_keys - {"A", "B"}
+                details = []
+                if missing_keys:
+                    details.append(f"missing keys: {sorted(missing_keys)}")
+                if extra_keys:
+                    details.append(f"extra keys: {sorted(extra_keys)}")
+                raise ValueError(
+                    f"Layer {layer!r} parameter keys do not match expected ('A', 'B') ({', '.join(details)}). "
+                    f"Got: {sorted(actual_keys)}"
+                )
+
+            shape_a = tuple(np.asarray(layer_dict["A"]).shape)
+            shape_b = tuple(np.asarray(layer_dict["B"]).shape)
+            if shape_a != (d, r):
+                raise ValueError(
+                    f"Layer {layer!r} parameter 'A' has shape {shape_a}, expected ({d}, {r})"
+                )
+            if shape_b != (r, d):
+                raise ValueError(
+                    f"Layer {layer!r} parameter 'B' has shape {shape_b}, expected ({r}, {d})"
+                )
 
 
 __all__ = [

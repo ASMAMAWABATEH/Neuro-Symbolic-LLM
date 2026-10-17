@@ -290,6 +290,14 @@ def resolve_split(domain: DomainConfig, split: str) -> str:
     return split
 
 
+def validate_checkpoint_params(
+    adapter: ResidualAdapter,
+    params: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Validate that checkpoint parameters match the adapter layers, keys, and shapes."""
+    adapter.validate_params(params)
+
+
 def evaluate_checkpoint(
     substrate: FrozenSubstrate,
     adapter: ResidualAdapter,
@@ -309,6 +317,7 @@ def evaluate_checkpoint(
         outer: {inner: jnp.asarray(val) for inner, val in inner_dict.items()}
         for outer, inner_dict in raw.items()
     }
+    validate_checkpoint_params(adapter, params)
     results = {}
     for d in domains:
         split_name = resolve_split(d, split)
@@ -580,4 +589,5 @@ __all__ = [
     "resolve_split",
     "run_sequential",
     "summarize",
+    "validate_checkpoint_params",
 ]

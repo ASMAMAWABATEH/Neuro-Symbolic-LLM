@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import jax.numpy as jnp
 import numpy as np
@@ -11,6 +13,13 @@ import optax
 import pytest
 import yaml
 
+if "torchax" not in sys.modules:
+    sys.modules["torchax"] = MagicMock()
+if "torchax.interop" not in sys.modules:
+    sys.modules["torchax.interop"] = MagicMock()
+
+from frozenllm.substrate.architecture import Architecture
+from residual import ResidualAdapter, ResidualConfig
 from stages.results import (
     RunWriter,
     default_run_name,
@@ -18,6 +27,7 @@ from stages.results import (
     load_params,
     run_metadata,
 )
+from stages.stage_base import evaluate_checkpoint, validate_checkpoint_params
 
 
 def test_writes_all_artifacts(tmp_path: Path) -> None:
@@ -233,3 +243,93 @@ def test_interrupted_pair_checkpoint_fallback_to_params(tmp_path: Path) -> None:
     assert meta == {}
     np.testing.assert_array_equal(recovered_params["layer_7"]["A"], np.ones((4, 2)))
     np.testing.assert_array_equal(recovered_params["layer_7"]["B"], np.zeros((2, 4)))
+
+
+def test_validate_checkpoint_params_exact_layers_and_shapes() -> None:
+    arch = Architecture(
+        model_family="gpt2",
+        num_layers=4,
+        hidden_size=16,
+        num_heads=2,
+        head_dim=8,
+        vocab_size=32,
+    )
+    adapter = ResidualAdapter(ResidualConfig(rank=2, layers=[1, 2]), arch)
+    params = adapter.init_params()
+
+    # 1. Valid params pass
+    validate_checkpoint_params(adapter, params)
+
+    # 2. Missing layer is rejected
+    missing_layer_params = {k: v for k, v in params.items() if k != "layer_2"}
+    with pytest.raises(ValueError, match="missing layers: \\['layer_2'\\]"):
+        validate_checkpoint_params(adapter, missing_layer_params)
+
+    # 3. Extra layer is rejected
+    extra_layer_params = {
+        **params,
+        "layer_3": {
+            "A": jnp.zeros((16, 2), dtype=jnp.float32),
+            "B": jnp.zeros((2, 16), dtype=jnp.float32),
+        },
+    }
+    with pytest.raises(ValueError, match="extra layers: \\['layer_3'\\]"):
+        validate_checkpoint_params(adapter, extra_layer_params)
+
+    # 4. Missing A or B key is rejected
+    missing_key_params = {
+        "layer_1": {"A": params["layer_1"]["A"]},
+        "layer_2": params["layer_2"],
+    }
+    with pytest.raises(ValueError, match="missing keys: \\['B'\\]"):
+        validate_checkpoint_params(adapter, missing_key_params)
+
+    # 5. Extra key in layer is rejected
+    extra_key_params = {
+        "layer_1": {**params["layer_1"], "C": jnp.zeros((2, 2))},
+        "layer_2": params["layer_2"],
+    }
+    with pytest.raises(ValueError, match="extra keys: \\['C'\\]"):
+        validate_checkpoint_params(adapter, extra_key_params)
+
+    # 6. Mismatched A shape is rejected
+    wrong_a_params = {
+        "layer_1": {"A": jnp.zeros((16, 4)), "B": params["layer_1"]["B"]},
+        "layer_2": params["layer_2"],
+    }
+    with pytest.raises(
+        ValueError, match="parameter 'A' has shape \\(16, 4\\), expected \\(16, 2\\)"
+    ):
+        validate_checkpoint_params(adapter, wrong_a_params)
+
+    # 7. Mismatched B shape is rejected
+    wrong_b_params = {
+        "layer_1": {"A": params["layer_1"]["A"], "B": jnp.zeros((4, 16))},
+        "layer_2": params["layer_2"],
+    }
+    with pytest.raises(
+        ValueError, match="parameter 'B' has shape \\(4, 16\\), expected \\(2, 16\\)"
+    ):
+        validate_checkpoint_params(adapter, wrong_b_params)
+
+
+def test_evaluate_checkpoint_fails_fast_on_mismatched_checkpoint() -> None:
+    arch = Architecture(
+        model_family="gpt2",
+        num_layers=4,
+        hidden_size=16,
+        num_heads=2,
+        head_dim=8,
+        vocab_size=32,
+    )
+    adapter = ResidualAdapter(ResidualConfig(rank=2, layers=[1, 2]), arch)
+    # Checkpoint omits layer_2
+    invalid_checkpoint = {
+        "layer_1": {
+            "A": np.zeros((16, 2), dtype=np.float32),
+            "B": np.zeros((2, 16), dtype=np.float32),
+        }
+    }
+    mock_substrate = MagicMock()
+    with pytest.raises(ValueError, match="missing layers: \\['layer_2'\\]"):
+        evaluate_checkpoint(mock_substrate, adapter, invalid_checkpoint, domains=[])
