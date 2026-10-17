@@ -1,6 +1,6 @@
 """Run artifacts shared by the stage runners; one fresh directory per run.
-JSON is written atomically and ``metrics.jsonl`` is flushed per line, so a
-crashed run never leaves a truncated file.
+JSON and NumPy archives are written atomically and ``metrics.jsonl`` is flushed
+per line, so a crashed run never leaves a truncated file.
 """
 
 from __future__ import annotations
@@ -45,6 +45,36 @@ def _atomic_write_text(path: Path, text: str) -> None:
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+def _atomic_savez(path: Path, **arrays: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            np.savez(f, **arrays)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def _resolve_archive_path(path: Path | str) -> Path:
+    p = Path(path)
+    if not p.is_file():
+        candidate = p if p.suffix == ".npz" else p.with_suffix(".npz")
+        if candidate.is_file():
+            return candidate
+        # Account for an interrupted pair of writes (checkpoint and companion params):
+        if candidate.parent.name == "params":
+            companion = candidate.parent.parent / "checkpoints" / candidate.name
+            if companion.is_file():
+                return companion
+        elif candidate.parent.name == "checkpoints":
+            companion = candidate.parent.parent / "params" / candidate.name
+            if companion.is_file():
+                return companion
+    return p
 
 
 def _git(*args: str) -> str | None:
@@ -137,8 +167,7 @@ class RunWriter:
             for inner, leaf in leaves.items()
         }
         path = self.dir / "params" / f"{tag}.npz"
-        path.parent.mkdir(exist_ok=True)
-        np.savez(path, **flat)
+        _atomic_savez(path, **flat)
         return path
 
     def save_checkpoint(
@@ -165,16 +194,16 @@ class RunWriter:
             flat["__metadata__"] = np.array(json.dumps(_to_json(metadata)))
 
         path = self.dir / "checkpoints" / f"{tag}.npz"
-        path.parent.mkdir(exist_ok=True)
-        np.savez(path, **flat)
+        _atomic_savez(path, **flat)
         # Also save standalone weights for backwards compatibility.
         self.save_params(tag, params)
         return path
 
 
 def load_params(path: Path | str) -> dict[str, dict[str, np.ndarray]]:
+    resolved_path = _resolve_archive_path(path)
     params: dict[str, dict[str, np.ndarray]] = {}
-    with np.load(path) as data:
+    with np.load(resolved_path) as data:
         for key in data.files:
             if key.startswith("__"):
                 continue
@@ -211,12 +240,13 @@ def load_checkpoint(
         If the checkpoint contains pickled optimizer state (``__opt_treedef__``)
         and ``trusted`` is ``False``.
     """
+    resolved_path = _resolve_archive_path(path)
     params: dict[str, dict[str, np.ndarray]] = {}
     opt_leaves: dict[int, np.ndarray] = {}
     treedef = None
     metadata: dict[str, Any] = {}
 
-    with np.load(path) as data:
+    with np.load(resolved_path) as data:
         for key in data.files:
             if key == "__opt_treedef__":
                 if not trusted:

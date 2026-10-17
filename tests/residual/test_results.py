@@ -167,3 +167,69 @@ def test_checkpoint_malicious_treedef_rejected(
         load_checkpoint(crafted_path)
 
     assert not unpickle_called
+
+
+def test_atomic_savez_leaves_no_truncated_file_on_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stages.results import _atomic_savez
+
+    target = tmp_path / "target.npz"
+
+    def crashing_savez(*args, **kwargs):
+        raise OSError("Disk full or simulated crash during write")
+
+    monkeypatch.setattr("stages.results.np.savez", crashing_savez)
+
+    with pytest.raises(IOError, match="simulated crash"):
+        _atomic_savez(target, a=np.array([1, 2, 3]))
+
+    # Target path must not exist or be left truncated
+    assert not target.exists()
+    # Temporary files should be cleaned up
+    assert list(tmp_path.glob(".*")) == []
+
+
+def test_interrupted_pair_params_fallback_to_checkpoint(tmp_path: Path) -> None:
+    params = {"layer_7": {"A": jnp.ones((4, 2)), "B": jnp.zeros((2, 4))}}
+    optimizer = optax.adam(1e-3)
+    opt_state = optimizer.init(params)
+
+    with RunWriter(tmp_path, "run") as writer:
+        ckpt_path = writer.save_checkpoint(
+            "task_0_dom",
+            params,
+            opt_state=opt_state,
+            global_step=10,
+        )
+
+    assert ckpt_path.exists()
+
+    # Simulate an interruption where params/<tag>.npz was deleted/never written
+    params_path = tmp_path / "run" / "params" / "task_0_dom.npz"
+    assert params_path.exists()
+    params_path.unlink()
+
+    # load_params on the missing params path should transparently fall back to checkpoint
+    recovered_params = load_params(params_path)
+    np.testing.assert_array_equal(recovered_params["layer_7"]["A"], np.ones((4, 2)))
+    np.testing.assert_array_equal(recovered_params["layer_7"]["B"], np.zeros((2, 4)))
+
+
+def test_interrupted_pair_checkpoint_fallback_to_params(tmp_path: Path) -> None:
+    params = {"layer_7": {"A": jnp.ones((4, 2)), "B": jnp.zeros((2, 4))}}
+
+    with RunWriter(tmp_path, "run") as writer:
+        params_path = writer.save_params("task_0_dom", params)
+
+    # Simulate an interruption where checkpoints/<tag>.npz was never written
+    ckpt_path = tmp_path / "run" / "checkpoints" / "task_0_dom.npz"
+    assert not ckpt_path.exists()
+    assert params_path.exists()
+
+    # load_checkpoint on missing checkpoint path should recover params from companion params archive
+    recovered_params, opt_state, meta = load_checkpoint(ckpt_path)
+    assert opt_state is None
+    assert meta == {}
+    np.testing.assert_array_equal(recovered_params["layer_7"]["A"], np.ones((4, 2)))
+    np.testing.assert_array_equal(recovered_params["layer_7"]["B"], np.zeros((2, 4)))
