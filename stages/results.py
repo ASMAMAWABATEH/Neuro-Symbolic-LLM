@@ -189,7 +189,28 @@ def load_params(path: Path | str) -> dict[str, dict[str, np.ndarray]]:
 
 def load_checkpoint(
     path: Path | str,
+    *,
+    trusted: bool = False,
 ) -> tuple[dict[str, dict[str, np.ndarray]], Any | None, dict[str, Any]]:
+    """Load adapter params, optax optimizer state, and training metadata.
+
+    Parameters
+    ----------
+    path:
+        Path to the ``.npz`` checkpoint file.
+    trusted:
+        Whether the checkpoint is from a trusted source. Defaults to ``False``.
+        When ``False``, refusing to deserialize ``__opt_treedef__`` prevents
+        arbitrary code execution from untrusted pickle payloads. Set to ``True``
+        only when loading checkpoints from trusted sources. For untrusted
+        checkpoints where only weights are needed, use :func:`load_params`.
+
+    Raises
+    ------
+    ValueError:
+        If the checkpoint contains pickled optimizer state (``__opt_treedef__``)
+        and ``trusted`` is ``False``.
+    """
     params: dict[str, dict[str, np.ndarray]] = {}
     opt_leaves: dict[int, np.ndarray] = {}
     treedef = None
@@ -198,6 +219,13 @@ def load_checkpoint(
     with np.load(path) as data:
         for key in data.files:
             if key == "__opt_treedef__":
+                if not trusted:
+                    raise ValueError(
+                        f"Refusing to deserialize untrusted '__opt_treedef__' from {path}. "
+                        "Unpickling untrusted checkpoints can lead to arbitrary code execution. "
+                        "Pass `trusted=True` to `load_checkpoint` only if this checkpoint is from "
+                        "a trusted source. To load parameter weights safely, use `load_params`."
+                    )
                 treedef = pickle.loads(data[key].tobytes())
             elif key == "__metadata__":
                 metadata = json.loads(str(data[key]))

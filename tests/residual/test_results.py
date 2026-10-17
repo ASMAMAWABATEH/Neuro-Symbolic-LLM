@@ -92,8 +92,18 @@ def test_checkpoint_round_trip(tmp_path: Path) -> None:
             domain="eurlex",
         )
 
-    # 1. load_checkpoint restores params, opt_state, and metadata
-    loaded_params, loaded_opt, meta = load_checkpoint(ckpt_path)
+    # 1. Untrusted loading refuses to unpickle __opt_treedef__ and raises ValueError
+    with pytest.raises(
+        ValueError, match="Refusing to deserialize untrusted '__opt_treedef__'"
+    ):
+        load_checkpoint(ckpt_path)
+    with pytest.raises(
+        ValueError, match="Refusing to deserialize untrusted '__opt_treedef__'"
+    ):
+        load_checkpoint(ckpt_path, trusted=False)
+
+    # 2. Trusted loading restores params, opt_state, and metadata
+    loaded_params, loaded_opt, meta = load_checkpoint(ckpt_path, trusted=True)
     assert meta["global_step"] == 42
     assert meta["domain"] == "eurlex"
     np.testing.assert_array_equal(loaded_params["layer_7"]["A"], np.ones((4, 2)))
@@ -105,6 +115,55 @@ def test_checkpoint_round_trip(tmp_path: Path) -> None:
     updates, next_opt = optimizer.update(grads, loaded_opt, loaded_params)
     assert next_opt is not None
 
-    # 2. Backwards-compatible load_params works on the checkpoint path too
+    # 3. Backwards-compatible load_params works on the checkpoint path too
     params_only = load_params(ckpt_path)
     np.testing.assert_array_equal(params_only["layer_7"]["A"], np.ones((4, 2)))
+
+
+def test_checkpoint_without_optimizer_state_loads_untrusted(tmp_path: Path) -> None:
+    params = {"layer_7": {"A": jnp.ones((4, 2)), "B": jnp.zeros((2, 4))}}
+
+    with RunWriter(tmp_path, "run") as writer:
+        ckpt_path = writer.save_checkpoint(
+            "no_opt",
+            params,
+            opt_state=None,
+            global_step=10,
+        )
+
+    # Checkpoint without optimizer state can be loaded safely with trusted=False
+    loaded_params, loaded_opt, meta = load_checkpoint(ckpt_path, trusted=False)
+    assert loaded_opt is None
+    assert meta["global_step"] == 10
+    np.testing.assert_array_equal(loaded_params["layer_7"]["A"], np.ones((4, 2)))
+
+
+def test_checkpoint_malicious_treedef_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Construct a crafted checkpoint with a malicious payload in __opt_treedef__
+    malicious_bytes = b"cos\nsystem\n(S'echo exploit_ran'\ntR."
+    crafted_path = tmp_path / "malicious.npz"
+    np.savez(
+        crafted_path,
+        **{
+            "params/layer_0/w": np.ones((2, 2)),
+            "__opt_treedef__": np.frombuffer(malicious_bytes, dtype=np.uint8),
+        },
+    )
+
+    unpickle_called = []
+
+    def fail_on_unpickle(*args, **kwargs):
+        unpickle_called.append(True)
+        raise AssertionError("pickle.loads must NOT be called on untrusted checkpoint!")
+
+    monkeypatch.setattr("stages.results.pickle.loads", fail_on_unpickle)
+
+    # Loading without trusted=True must raise ValueError and NOT execute pickle.loads
+    with pytest.raises(
+        ValueError, match="Refusing to deserialize untrusted '__opt_treedef__'"
+    ):
+        load_checkpoint(crafted_path)
+
+    assert not unpickle_called

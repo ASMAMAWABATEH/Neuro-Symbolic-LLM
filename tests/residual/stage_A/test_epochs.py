@@ -162,7 +162,7 @@ def test_zero_epochs_performs_no_updates(
     # Checkpoint saved with initial params
     ckpt_path = tmp_path / "run" / "checkpoints" / "task_0_empty.npz"
     assert ckpt_path.exists()
-    _, _, meta = load_checkpoint(ckpt_path)
+    _, _, meta = load_checkpoint(ckpt_path, trusted=True)
     assert meta["global_step"] == 0
     assert meta["epoch"] == 0
 
@@ -233,12 +233,16 @@ def test_global_update_count_and_checkpoint_metadata(
         assert ep["epoch_time"] >= 0
 
     # Verify checkpoint metadata
-    _, _, meta_a = load_checkpoint(run_dir / "checkpoints" / "task_0_dom_a.npz")
+    _, _, meta_a = load_checkpoint(
+        run_dir / "checkpoints" / "task_0_dom_a.npz", trusted=True
+    )
     assert meta_a["domain"] == "dom_a"
     assert meta_a["epoch"] == 2
     assert meta_a["global_step"] == 8
 
-    _, _, meta_b = load_checkpoint(run_dir / "checkpoints" / "task_1_dom_b.npz")
+    _, _, meta_b = load_checkpoint(
+        run_dir / "checkpoints" / "task_1_dom_b.npz", trusted=True
+    )
     assert meta_b["domain"] == "dom_b"
     assert meta_b["epoch"] == 1
     assert meta_b["global_step"] == 11
@@ -312,7 +316,7 @@ def test_optimizer_state_persists_across_epochs(
         )
 
     _, opt_state, meta = load_checkpoint(
-        tmp_path / "run" / "checkpoints" / "task_0_a.npz"
+        tmp_path / "run" / "checkpoints" / "task_0_a.npz", trusted=True
     )
     assert meta["global_step"] == 8
     assert opt_state is not None
@@ -347,7 +351,7 @@ def test_optimizer_state_resets_between_domains_when_configured(
 
     # In task 1 (domain b), since reset_optimizer=True, Adam count reflects only domain b steps (3)
     _, opt_state_b, meta_b = load_checkpoint(
-        tmp_path / "run" / "checkpoints" / "task_1_b.npz"
+        tmp_path / "run" / "checkpoints" / "task_1_b.npz", trusted=True
     )
     assert meta_b["global_step"] == 7
     assert opt_state_b is not None
