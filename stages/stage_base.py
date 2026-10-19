@@ -7,10 +7,13 @@ function (``run_sequential``); stage-specific code lives in ``stages/stage_<X>/`
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
+import warnings
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, fields
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -381,7 +384,19 @@ def run_sequential(
                 substrate, adapter, params, d.eval_set, jit=training.jit
             )
             writer.log("eval", after_task=after_task, domain=d.name, **row[d.name])
-        log.info("eval after_task=%d %s", after_task, _fmt_losses(row))
+        if after_task < 0:
+            log.info(
+                "[Validation] Baseline zero-shot eval after_task=%d: %s",
+                after_task,
+                _fmt_losses(row),
+            )
+        else:
+            log.info(
+                "[Validation] eval after_task=%d (%s): %s",
+                after_task,
+                domains[after_task].name,
+                _fmt_losses(row),
+            )
         return row
 
     # after_task=-1: before training, where adapted equals base.
@@ -433,17 +448,21 @@ def run_sequential(
             len(domain.train_blocks) // training.batch_size if num_epochs > 0 else 0
         )
         total_domain_batches = batches_per_epoch * num_epochs
+        log.info("=" * 78)
         log.info(
-            "task=%d domain=%s epochs=%d batches_per_epoch=%d total_batches=%d",
-            t,
+            ">>> DOMAIN [%d/%d]: '%s' | Epochs: %d | Batches/Epoch: %d (Total: %d)",
+            t + 1,
+            len(domains),
             domain.name,
             num_epochs,
             batches_per_epoch,
             total_domain_batches,
         )
+        log.info("=" * 78)
 
         domain_step = 0
         for epoch in range(1, num_epochs + 1):
+            log.info("  ┌─── EPOCH %d/%d ['%s'] ───", epoch, num_epochs, domain.name)
             epoch_start_time = time.time()
             epoch_step_times: list[float] = []
             epoch_scalars: list[dict[str, float]] = []
@@ -485,15 +504,12 @@ def run_sequential(
                     total_domain_batches,
                 ):
                     log.info(
-                        "task=%d epoch=%d/%d batch=%d/%d step=%d %s time=%.3fs",
-                        t,
-                        epoch,
-                        num_epochs,
+                        "  │ [Batch %d/%d] step=%d | %s | ppl=%.2f",
                         batch_idx,
                         batches_per_epoch,
                         domain_step,
                         _fmt_terms(scalars),
-                        step_time,
+                        float(perplexity(scalars["task"])),
                     )
 
             epoch_duration = float(time.time() - epoch_start_time)
@@ -521,15 +537,13 @@ def run_sequential(
                     **{f"loss_{k}": v for k, v in mean_terms.items()},
                 )
                 log.info(
-                    "task=%d domain=%s epoch=%d/%d finished: batches=%d %s ppl=%.2f epoch_time=%.3fs",
-                    t,
-                    domain.name,
+                    "  └── Epoch %d/%d Finished | Duration: %.2fs (avg %.3fs/step) | %s | ppl=%.2f",
                     epoch,
                     num_epochs,
-                    len(epoch_scalars),
+                    epoch_duration,
+                    mean_step,
                     _fmt_terms(mean_terms),
                     epoch_ppl,
-                    epoch_duration,
                 )
 
         writer.save_checkpoint(
@@ -541,6 +555,12 @@ def run_sequential(
             domain=domain.name,
             epoch=num_epochs,
             step=domain_step,
+        )
+        log.info(
+            "Checkpoint saved: task_%d_%s (global_step=%d)",
+            t,
+            domain.name,
+            global_step,
         )
         rows.append(eval_all(t))
 
@@ -570,6 +590,193 @@ def _fmt_terms(scalars: Mapping[str, float]) -> str:
     )
 
 
+def configure_logging(level: int = logging.INFO) -> None:
+    """Configure standard and professional ML training output logging.
+
+    Suppresses noisy third-party libraries (HTTP requests, downloader progress,
+    backend device probing warnings). Per-line timestamps are removed to minimize
+    terminal clutter; clean ISO timestamps are logged at the start and end of training.
+    """
+    logging.basicConfig(level=level, format="%(message)s", force=True)
+
+    # Silence verbose 3rd-party loggers
+    noisy_loggers = (
+        "httpx",
+        "httpcore",
+        "urllib3",
+        "requests",
+        "huggingface_hub",
+        "transformers",
+        "datasets",
+        "filelock",
+        "jax",
+        "jax._src.lib.xla_client",
+        "absl",
+    )
+    for name in noisy_loggers:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+    # Environment flags to quiet HuggingFace and backend spam
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+
+    # Filter benign environment warnings (e.g. CPU-only TPU missing backend notices)
+    warnings.filterwarnings("ignore", message=r".*Unable to initialize backend 'tpu'.*")
+    warnings.filterwarnings(
+        "ignore", message=r".*unauthenticated requests to the HF Hub.*"
+    )
+
+    try:
+        import datasets
+
+        datasets.logging.set_verbosity_error()
+        datasets.disable_progress_bar()
+    except Exception:
+        pass
+
+    try:
+        import transformers
+
+        transformers.logging.set_verbosity_error()
+    except Exception:
+        pass
+
+    try:
+        import huggingface_hub.utils.logging as hf_logging
+
+        hf_logging.set_verbosity_error()
+    except Exception:
+        pass
+
+
+def log_experiment_header(
+    logger: logging.Logger,
+    cfg: RunConfig,
+    arch: Any,
+    adapter: Any,
+    n_trainable: int,
+    n_frozen: int,
+    run_dir: Any,
+    domains: Sequence[Domain],
+    start_time: str | None = None,
+) -> None:
+    """Log structured initialization banner and experiment hyperparameters."""
+    train_cfg = cfg.training
+    ratio = (n_trainable / n_frozen * 100.0) if n_frozen > 0 else 0.0
+    ts = start_time or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    logger.info("=" * 78)
+    logger.info("STAGE A1: SEQUENTIAL RESIDUAL ADAPTER TRAINING")
+    logger.info("=" * 78)
+    logger.info("Started At         : %s", ts)
+    logger.info(
+        "Model Architecture : %s (%d layers, hidden_dim=%d)",
+        train_cfg.model,
+        arch.num_layers,
+        arch.hidden_size,
+    )
+    logger.info(
+        "Residual Adapter   : target_layers=%s | rank=%d | alpha=%s",
+        list(adapter.layers),
+        cfg.adapter.rank,
+        cfg.adapter.alpha,
+    )
+    logger.info(
+        "Parameters         : %s trainable | %s frozen (%.3f%% trainable)",
+        f"{n_trainable:,}",
+        f"{n_frozen:,}",
+        ratio,
+    )
+    logger.info(
+        "Hyperparameters    : batch_size=%d | seq_len=%d | lr=%.2e | jit=%s",
+        train_cfg.batch_size,
+        train_cfg.seq_len,
+        train_cfg.learning_rate,
+        train_cfg.jit,
+    )
+    logger.info("Run Directory      : %s", run_dir)
+    logger.info("Curriculum (%d domain(s)):", len(domains))
+    for i, d in enumerate(domains, 1):
+        logger.info(
+            "  [%d] %-10s -> %d blocks | %d eval batches | %d epoch(s)",
+            i,
+            d.name,
+            len(d.train_blocks),
+            len(d.eval_set),
+            d.epochs,
+        )
+    logger.info("-" * 78)
+
+
+def log_final_summary(
+    logger: logging.Logger,
+    summary: Mapping[str, Any],
+    frozen: Mapping[str, Any],
+    start_time: float | None = None,
+) -> None:
+    """Log senior ML engineer standard summary table and continual learning metrics."""
+    now = datetime.now(timezone.utc)
+    ts = now.strftime("%Y-%m-%d %H:%M:%S UTC")
+    elapsed_str = ""
+    if start_time is not None:
+        elapsed_sec = int(time.time() - start_time)
+        m, s = divmod(elapsed_sec, 60)
+        h, m = divmod(m, 60)
+        if h > 0:
+            elapsed_str = f" (Total Duration: {h}h {m}m {s}s)"
+        else:
+            elapsed_str = f" (Total Duration: {m}m {s}s)"
+
+    logger.info("=" * 78)
+    logger.info("EXPERIMENT SUMMARY & METRICS")
+    logger.info("=" * 78)
+    logger.info("Completed At       : %s%s", ts, elapsed_str)
+
+    test_results = summary.get("test")
+    if isinstance(test_results, Mapping) and test_results:
+        logger.info("Test Evaluation Across Domains:")
+        logger.info(
+            "  %-12s  %-12s  %-10s  %-12s  %-10s",
+            "Domain",
+            "Loss",
+            "PPL",
+            "Base Loss",
+            "Base PPL",
+        )
+        logger.info("  " + "-" * 62)
+        for dom, metrics in test_results.items():
+            if isinstance(metrics, Mapping):
+                logger.info(
+                    "  %-12s  %-12.4f  %-10.2f  %-12.4f  %-10.2f",
+                    dom,
+                    metrics.get("loss", 0.0),
+                    metrics.get("ppl", 0.0),
+                    metrics.get("base_loss", 0.0),
+                    metrics.get("base_ppl", 0.0),
+                )
+        logger.info("  " + "-" * 62)
+
+    mean_seen = summary.get("mean_seen_loss", [])
+    forgetting = summary.get("mean_forgetting", [])
+    logger.info("Continual Learning Metrics:")
+    if mean_seen:
+        seen_str = ", ".join(f"{v:.4f}" for v in mean_seen)
+        logger.info("  • Mean Seen Loss : [%s] (Final: %.4f)", seen_str, mean_seen[-1])
+    if forgetting:
+        forg_str = ", ".join("None" if v is None else f"{v:+.4f}" for v in forgetting)
+        final_forg = "None" if forgetting[-1] is None else f"{forgetting[-1]:+.4f}"
+        logger.info("  • Mean Forgetting: [%s] (Final: %s)", forg_str, final_forg)
+
+    status_str = (
+        "PASSED (Base model parameters 100% frozen)"
+        if frozen.get("params_unchanged")
+        else "FAILED (Base model parameters modified!)"
+    )
+    logger.info("Substrate Integrity: %s", status_str)
+    logger.info("=" * 78)
+
+
 __all__ = [
     "DOMAIN_NAME",
     "SECTIONS",
@@ -581,10 +788,13 @@ __all__ = [
     "base_logits",
     "batches",
     "checked_kwargs",
+    "configure_logging",
     "evaluate",
     "evaluate_checkpoint",
     "load_configs",
     "load_token_blocks",
+    "log_experiment_header",
+    "log_final_summary",
     "make_eval_set",
     "resolve_split",
     "run_sequential",

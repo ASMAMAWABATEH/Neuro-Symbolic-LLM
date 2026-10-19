@@ -10,6 +10,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -26,10 +27,13 @@ from stages.stage_A.a1 import A1Config, a1_objective  # noqa: E402
 from stages.stage_base import (  # noqa: E402
     Domain,
     RunConfig,
+    configure_logging,
     evaluate,
     evaluate_checkpoint,
     load_configs,
     load_token_blocks,
+    log_experiment_header,
+    log_final_summary,
     make_eval_set,
     run_sequential,
 )
@@ -111,14 +115,11 @@ def apply_overrides(cfg: RunConfig, args: argparse.Namespace) -> RunConfig:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    start_time = time.time()
+    configure_logging(level=logging.INFO)
     args = parse_args(argv)
     cfg = apply_overrides(load_configs(args.config, A1Config), args)
     train_cfg = cfg.training
-    log.info("adapter=%s", cfg.adapter)
-    log.info("objective=%s", cfg.objective)
-    log.info("training=%s", train_cfg)
-    log.info("domains=%s", [d.name for d in cfg.domains])
 
     substrate = FrozenSubstrate(train_cfg.model)
     arch = substrate.architecture
@@ -130,17 +131,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     params = adapter.init_params()
     n_trainable = ResidualAdapter.num_params(params)
     n_frozen = sum(p.numel() for p in substrate.params.values())
-    log.info(
-        "model=%s L=%d d=%d layers=%s rank=%d trainable=%d frozen=%d ratio=%.3e",
-        train_cfg.model,
-        arch.num_layers,
-        arch.hidden_size,
-        list(adapter.layers),
-        cfg.adapter.rank,
-        n_trainable,
-        n_frozen,
-        n_trainable / n_frozen,
-    )
 
     frozen = substrate.verify_frozen()
     if not frozen["params_unchanged"]:
@@ -173,6 +163,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     # Load data before creating the run directory, so bad datasets fail fast.
+    log.info("Preparing datasets across %d domain(s)...", len(cfg.domains))
     domains = []
     for d in cfg.domains:
         train_blocks = load_token_blocks(substrate, d, d.train_split, train_cfg.seq_len)
@@ -187,16 +178,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 epochs=train_cfg.epochs if d.epochs is None else d.epochs,
             )
         )
-        log.info(
-            "domain=%s train_blocks=%d eval_batches=%d",
-            d.name,
-            len(train_blocks),
-            len(domains[-1].eval_set),
-        )
 
     run_name = args.run_name or default_run_name("a1")
     with RunWriter(train_cfg.output_dir, run_name) as writer:
-        log.info("run_dir=%s", writer.dir)
         writer.write_config(cfg.to_dict())
         writer.write_json(
             "meta.json",
@@ -212,6 +196,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "epochs": {d.name: d.epochs for d in domains},
                 "jit": train_cfg.jit,
             },
+        )
+        log_experiment_header(
+            log,
+            cfg=cfg,
+            arch=arch,
+            adapter=adapter,
+            n_trainable=n_trainable,
+            n_frozen=n_frozen,
+            run_dir=writer.dir,
+            domains=domains,
         )
         params, summary = run_sequential(
             substrate,
@@ -232,6 +226,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.eval_batches is not None
             else train_cfg.eval_batches
         )
+        log.info("Running final test evaluation across %d domains...", len(cfg.domains))
         test_results = {}
         for d in cfg.domains:
             test_blocks = load_token_blocks(
@@ -247,10 +242,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         summary["test"] = test_results
         writer.write_json("results.json", summary)
 
-    log.info("mean_seen_loss=%s", summary["mean_seen_loss"])
-    log.info("mean_forgetting=%s", summary["mean_forgetting"])
-    log.info("test_results=%s", summary["test"])
-    log.info("verify_frozen=%s", frozen)
+    log_final_summary(log, summary, frozen, start_time=start_time)
     if not frozen["params_unchanged"]:
         log.error("Base parameters changed during training.")
         return 1
