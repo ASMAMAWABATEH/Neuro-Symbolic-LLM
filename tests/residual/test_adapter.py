@@ -228,16 +228,17 @@ def test_residual_formula(activation: str, alpha: float | None) -> None:
 
 
 def test_identity_is_sum_of_rank_one_atoms() -> None:
-    d, r = 32, 3
-    adapter = ResidualAdapter(ResidualConfig(rank=r), _arch(12, d))
-    rng = np.random.default_rng(1)
-    A = jnp.asarray(rng.normal(size=(d, r)), dtype=jnp.float32)
-    B = jnp.asarray(rng.normal(size=(r, d)), dtype=jnp.float32)
-    h = _hidden(d)
-    atoms = sum((h @ A[:, i])[..., None] * B[i] for i in range(r))
-    np.testing.assert_allclose(
-        adapter.residual({"A": A, "B": B}, h), atoms, rtol=1e-3, atol=1e-4
-    )
+    with jax.default_matmul_precision("highest"):
+        d, r = 32, 3
+        adapter = ResidualAdapter(ResidualConfig(rank=r), _arch(12, d))
+        rng = np.random.default_rng(1)
+        A = jnp.asarray(rng.normal(size=(d, r)), dtype=jnp.float32)
+        B = jnp.asarray(rng.normal(size=(r, d)), dtype=jnp.float32)
+        h = _hidden(d)
+        atoms = sum((h @ A[:, i])[..., None] * B[i] for i in range(r))
+        np.testing.assert_allclose(
+            adapter.residual({"A": A, "B": B}, h), atoms, rtol=1e-4, atol=1e-4
+        )
 
 
 @pytest.mark.parametrize(
