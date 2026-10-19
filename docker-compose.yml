@@ -9,6 +9,8 @@ services:
       - nsllm-hf-cache:/root/.cache/huggingface
     environment:
       - PYTHONUNBUFFERED=1
+      - TF_CPP_MIN_LOG_LEVEL=3
+      - GLOG_minloglevel=3
     command: bash
 
   test:
@@ -20,6 +22,8 @@ services:
       - nsllm-hf-cache:/root/.cache/huggingface
     environment:
       - PYTHONUNBUFFERED=1
+      - TF_CPP_MIN_LOG_LEVEL=3
+      - GLOG_minloglevel=3
     command: pytest
 
 volumes:

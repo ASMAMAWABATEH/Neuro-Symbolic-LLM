@@ -634,12 +634,7 @@ def _fmt_terms(scalars: Mapping[str, float]) -> str:
 
 
 def configure_logging(level: int = logging.INFO) -> None:
-    """Configure standard and professional ML training output logging.
-
-    Suppresses noisy third-party libraries (HTTP requests, downloader progress,
-    backend device probing warnings). Per-line timestamps are removed to minimize
-    terminal clutter; clean ISO timestamps are logged at the start and end of training.
-    """
+    """Configure standard and professional ML training output logging."""
     logging.basicConfig(level=level, format="%(message)s", force=True)
 
     # Silence verbose 3rd-party loggers
@@ -663,6 +658,7 @@ def configure_logging(level: int = logging.INFO) -> None:
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+    os.environ.setdefault("GLOG_minloglevel", "3")
 
     # Filter benign environment warnings (e.g. CPU-only TPU missing backend notices)
     warnings.filterwarnings("ignore", message=r".*Unable to initialize backend 'tpu'.*")

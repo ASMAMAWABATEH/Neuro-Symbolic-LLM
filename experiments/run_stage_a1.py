@@ -9,11 +9,18 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
+
+# Silence verbose C++ runtime warnings (e.g. XLA slow_operation_alarm) before JAX initializes
+os.environ.setdefault("GLOG_minloglevel", "3")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # Run as a script: put the repo root on sys.path.
