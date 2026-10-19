@@ -182,9 +182,10 @@ def test_run_sequential_logs_only_returned_terms(
     train = [e for e in events if e["event"] == "train"]
     assert len(train) == 2
     assert {k for k in train[0] if k.startswith("loss_")} == {"loss_total", "loss_task"}
-    step_lines = [r.getMessage() for r in caplog.records if " step=" in r.getMessage()]
-    assert step_lines and all("task_loss=" in m for m in step_lines)
-    assert not any("kl=" in m or "wd=" in m for m in step_lines)
+    batch_lines = [r.getMessage() for r in caplog.records if "Batch " in r.getMessage()]
+    assert batch_lines and all("task_loss=" in m for m in batch_lines)
+    assert not any("step=" in m for m in batch_lines)
+    assert not any("kl=" in m or "wd=" in m for m in batch_lines)
 
 
 @pytest.mark.parametrize(

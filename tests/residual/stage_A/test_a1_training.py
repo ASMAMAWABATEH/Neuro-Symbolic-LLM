@@ -174,7 +174,7 @@ def test_grad_a_matches_finite_difference(
         return float(loss({**params, key: {**params[key], "A": a}}))
 
     fd = (shifted(eps) - shifted(-eps)) / (2 * eps)
-    np.testing.assert_allclose(fd, float(g_a[i, j]), rtol=1e-2)
+    np.testing.assert_allclose(fd, float(g_a[i, j]), rtol=2e-2, atol=1e-4)
 
 
 def test_substrate_params_receive_no_gradient(

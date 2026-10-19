@@ -462,7 +462,7 @@ def run_sequential(
 
         domain_step = 0
         for epoch in range(1, num_epochs + 1):
-            log.info("  ┌─── EPOCH %d/%d ['%s'] ───", epoch, num_epochs, domain.name)
+            log.info("  EPOCH %d/%d ['%s']", epoch, num_epochs, domain.name)
             epoch_start_time = time.time()
             epoch_step_times: list[float] = []
             epoch_scalars: list[dict[str, float]] = []
@@ -485,6 +485,11 @@ def run_sequential(
                 scalars = {k: float(v) for k, v in terms.items()}
                 epoch_scalars.append(scalars)
 
+                train_writer_metrics = {f"loss_{k}": v for k, v in scalars.items()}
+                if "task" in scalars or "task_loss" in scalars:
+                    task_val = scalars.get("task", scalars.get("task_loss"))
+                    train_writer_metrics["ppl"] = float(perplexity(task_val))
+
                 writer.log(
                     "train",
                     task=t,
@@ -495,22 +500,32 @@ def run_sequential(
                     global_step=global_step,
                     tokens=tokens,
                     step_time=step_time,
-                    ppl=float(perplexity(scalars["task"])),
                     # Prefixed so the "task" term does not clash with the task index.
-                    **{f"loss_{k}": v for k, v in scalars.items()},
+                    **train_writer_metrics,
                 )
-                if domain_step % training.log_every == 0 or domain_step in (
-                    1,
-                    total_domain_batches,
-                ):
-                    log.info(
-                        "  │ [Batch %d/%d] step=%d | %s | ppl=%.2f",
-                        batch_idx,
-                        batches_per_epoch,
-                        domain_step,
-                        _fmt_terms(scalars),
-                        float(perplexity(scalars["task"])),
-                    )
+                is_first_batch = batch_idx == 1
+                is_last_batch = batch_idx == batches_per_epoch
+                is_interval = (
+                    training.log_every > 0 and domain_step % training.log_every == 0
+                )
+                if is_first_batch or is_last_batch or is_interval:
+                    terms_str = _fmt_terms(scalars)
+                    if "task" in scalars or "task_loss" in scalars:
+                        task_val = scalars.get("task", scalars.get("task_loss"))
+                        log.info(
+                            "  Batch %d/%d %s  ppl=%.2f",
+                            batch_idx,
+                            batches_per_epoch,
+                            terms_str,
+                            float(perplexity(task_val)),
+                        )
+                    else:
+                        log.info(
+                            "  Batch %d/%d %s",
+                            batch_idx,
+                            batches_per_epoch,
+                            terms_str,
+                        )
 
             epoch_duration = float(time.time() - epoch_start_time)
             if epoch_scalars:
@@ -518,8 +533,26 @@ def run_sequential(
                     k: float(np.mean([s[k] for s in epoch_scalars]))
                     for k in epoch_scalars[0]
                 }
-                epoch_ppl = float(perplexity(mean_terms["task"]))
-                mean_step = float(np.mean(epoch_step_times))
+                mean_batch_time = (
+                    float(np.mean(epoch_step_times)) if epoch_step_times else 0.0
+                )
+                terms_str = _fmt_terms(mean_terms)
+                epoch_writer_metrics = {f"loss_{k}": v for k, v in mean_terms.items()}
+                if "task" in mean_terms or "task_loss" in mean_terms:
+                    mean_task = mean_terms.get("task", mean_terms.get("task_loss"))
+                    epoch_ppl = float(perplexity(mean_task))
+                    epoch_writer_metrics["ppl"] = epoch_ppl
+                    completion_msg = (
+                        f"  Epoch {epoch}/{num_epochs} Finished | "
+                        f"Duration: {epoch_duration:.2f}s (avg {mean_batch_time:.3f}s/batch) | "
+                        f"{terms_str} | ppl={epoch_ppl:.2f}"
+                    )
+                else:
+                    completion_msg = (
+                        f"  Epoch {epoch}/{num_epochs} Finished | "
+                        f"Duration: {epoch_duration:.2f}s (avg {mean_batch_time:.3f}s/batch) | "
+                        f"{terms_str}"
+                    )
                 writer.log(
                     "epoch",
                     task=t,
@@ -532,19 +565,10 @@ def run_sequential(
                     epoch_tokens=epoch_tokens,
                     tokens=tokens,
                     epoch_time=epoch_duration,
-                    mean_step_time=mean_step,
-                    ppl=epoch_ppl,
-                    **{f"loss_{k}": v for k, v in mean_terms.items()},
+                    mean_step_time=mean_batch_time,
+                    **epoch_writer_metrics,
                 )
-                log.info(
-                    "  └── Epoch %d/%d Finished | Duration: %.2fs (avg %.3fs/step) | %s | ppl=%.2f",
-                    epoch,
-                    num_epochs,
-                    epoch_duration,
-                    mean_step,
-                    _fmt_terms(mean_terms),
-                    epoch_ppl,
-                )
+                log.info("%s", completion_msg)
 
         writer.save_checkpoint(
             f"task_{t}_{domain.name}",
@@ -580,14 +604,33 @@ def _fmt_losses(row: Mapping[str, Mapping[str, float]]) -> str:
 
 
 def _fmt_terms(scalars: Mapping[str, float]) -> str:
-    extra = (f"{k}={v:.3e}" for k, v in scalars.items() if k not in ("total", "task"))
-    return " ".join(
-        [
-            f"total_loss={scalars['total']:.4f}",
-            f"task_loss={scalars['task']:.4f}",
-            *extra,
-        ]
-    )
+    parts: list[str] = []
+    if "total" in scalars:
+        parts.append(f"total_loss={scalars['total']:.4f}")
+    elif "total_loss" in scalars:
+        parts.append(f"total_loss={scalars['total_loss']:.4f}")
+
+    if "task" in scalars:
+        parts.append(f"task_loss={scalars['task']:.4f}")
+    elif "task_loss" in scalars:
+        parts.append(f"task_loss={scalars['task_loss']:.4f}")
+
+    if not parts and "loss" in scalars:
+        parts.append(f"loss={scalars['loss']:.4f}")
+
+    known_keys = {"total", "total_loss", "task", "task_loss", "loss"}
+    for k, v in scalars.items():
+        if k not in known_keys:
+            try:
+                val = float(v)
+                if k in ("acc", "accuracy"):
+                    parts.append(f"{k}={val:.4f}")
+                else:
+                    parts.append(f"{k}={val:.3e}")
+            except (ValueError, TypeError):
+                parts.append(f"{k}={v}")
+
+    return " ".join(parts)
 
 
 def configure_logging(level: int = logging.INFO) -> None:
