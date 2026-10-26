@@ -13,6 +13,8 @@ from .context_builder import TemplateContexts
 
 class TextEncoder(Protocol):
     model_name: str
+    pooling: str
+    layer_idx: int
 
     def encode(self, texts: tuple[str, ...]) -> np.ndarray: ...
 
@@ -36,7 +38,9 @@ def initialize_template_kv(template: TemplateContexts, encoder: TextEncoder) -> 
         "num_contexts": len(template.contexts),
         "embedding_dim": len(vector),
         "encoder_model": encoder.model_name,
-        "pooling": "last_hidden_state_attention_masked_mean",
+        "pooling": encoder.pooling,
+        "intercept_layer": encoder.layer_idx,
+        "encoder_backend": "frozenllm.FrozenSubstrate",
         "initialization": "mean_supporting_context_embeddings_for_key_and_value",
     }
 
