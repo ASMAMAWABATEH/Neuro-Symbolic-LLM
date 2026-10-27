@@ -213,6 +213,16 @@ def contexts_from_pattern_record(
         seen_spans.add(span_identity)
 
         # Exact extraction: do not modify or normalize the source text.
+        is_relation_span = any(
+            other["document_id"] == document_id
+            and other["start"] <= start
+            and other["end"] >= end
+            and (other["start"] < start or other["end"] > end)
+            for other in source_spans
+        )
+
+        if is_relation_span:
+            continue
         context = source_text[start:end]
 
         contexts.append(context)
