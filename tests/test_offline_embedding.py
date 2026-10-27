@@ -9,7 +9,10 @@ from offline.embedding.context_builder import (
     load_pattern_contexts,
     prepare_contexts,
 )
-from offline.embedding.template_embeddings import initialize_template_kv
+from offline.embedding.template_embeddings import (
+    create_random_projection,
+    initialize_template_kv,
+)
 
 
 class DeterministicEncoder:
@@ -162,16 +165,34 @@ def test_average_embeddings_and_initialize_kv():
     )
 
     encoder = DeterministicEncoder()
-    result = initialize_template_kv(template, encoder)
 
-    expected = encoder.encode(template.contexts).mean(axis=0)
+    result = initialize_template_kv(
+        template,
+        encoder,
+        symbolic_dim=2,
+        projection_seed=42,
+    )
+
+    original_embeddings = encoder.encode(template.contexts)
+    average = original_embeddings.mean(axis=0)
+
+    projection = create_random_projection(
+        hidden_dim=3,
+        symbolic_dim=2,
+        seed=42,
+    )
+
+    expected = projection @ average
 
     np.testing.assert_allclose(result["key"], expected)
     np.testing.assert_allclose(result["value"], expected)
 
     assert result["key"] == result["value"]
     assert result["num_contexts"] == 2
-    assert result["embedding_dim"] == 3
+    assert result["embedding_dim"] == 2
+    assert result["encoder_hidden_dim"] == 3
+    assert result["projection_shape"] == [2, 3]
+    assert result["projection_seed"] == 42
 
 
 def test_duplicate_source_span_is_rejected(tmp_path):

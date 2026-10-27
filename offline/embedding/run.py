@@ -7,6 +7,8 @@ import argparse
 from .context_builder import load_pattern_contexts
 from .encoder import FrozenLLMEncoder
 from .template_embeddings import (
+    DEFAULT_PROJECTION_SEED,
+    DEFAULT_SYMBOLIC_DIM,
     initialize_template_kv,
     save_template_embeddings,
 )
@@ -16,12 +18,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate source-grounded template K/V embeddings."
     )
+
     parser.add_argument("--documents", required=True)
     parser.add_argument("--patterns", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--model", default="gpt2")
     parser.add_argument("--max-length", type=int, default=256)
     parser.add_argument("--layer-idx", type=int, default=None)
+    parser.add_argument(
+        "--symbolic-dim",
+        type=int,
+        default=DEFAULT_SYMBOLIC_DIM,
+    )
+    parser.add_argument(
+        "--projection-seed",
+        type=int,
+        default=DEFAULT_PROJECTION_SEED,
+    )
 
     args = parser.parse_args()
 
@@ -42,7 +55,13 @@ def main() -> None:
     records = []
 
     for template in templates:
-        record = initialize_template_kv(template, encoder)
+        record = initialize_template_kv(
+            template,
+            encoder,
+            symbolic_dim=args.symbolic_dim,
+            projection_seed=args.projection_seed,
+        )
+
         records.append(record)
 
         print(
