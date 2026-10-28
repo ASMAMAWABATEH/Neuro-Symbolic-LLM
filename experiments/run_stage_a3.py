@@ -62,32 +62,60 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--model", type=str, default=None)
-    parser.add_argument("--rank", type=int, default=None, help="Latent size r override.")
     parser.add_argument(
-        "--K", type=int, nargs="+", default=None,
+        "--rank", type=int, default=None, help="Latent size r override."
+    )
+    parser.add_argument(
+        "--K",
+        type=int,
+        nargs="+",
+        default=None,
         help="Inference steps; several values run one training per K.",
     )
-    parser.add_argument("--eta-z", type=float, default=None, help="Per-token inference step.")
-    parser.add_argument("--lambda-kl", type=float, default=None, help="KL trust-region weight.")
     parser.add_argument(
-        "--epochs", "--epoch", dest="epochs", type=int, default=None,
+        "--eta-z", type=float, default=None, help="Per-token inference step."
+    )
+    parser.add_argument(
+        "--lambda-kl", type=float, default=None, help="KL trust-region weight."
+    )
+    parser.add_argument(
+        "--epochs",
+        "--epoch",
+        dest="epochs",
+        type=int,
+        default=None,
         help="Epochs for every domain (smoke runs).",
     )
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--run-name", type=str, default=None)
-    parser.add_argument("--eval-batches", type=int, default=None, help="Override eval_batches.")
-    parser.add_argument("--split", type=str, default="test", help="Split for the final evaluation.")
     parser.add_argument(
-        "--energy-curve", action="store_true", default=False,
+        "--eval-batches", type=int, default=None, help="Override eval_batches."
+    )
+    parser.add_argument(
+        "--split", type=str, default="test", help="Split for the final evaluation."
+    )
+    parser.add_argument(
+        "--energy-curve",
+        action="store_true",
+        default=False,
         help="After each domain, log the exact energy at z^(0)..z^(K) (eager, slower).",
     )
-    parser.add_argument("--no-jit", action="store_true", default=False,
-                        help="Disable JAX JIT compilation for training and evaluation.")
+    parser.add_argument(
+        "--no-jit",
+        action="store_true",
+        default=False,
+        help="Disable JAX JIT compilation for training and evaluation.",
+    )
     return parser.parse_args(argv)
 
 
 def apply_overrides(cfg: RunConfig, args: argparse.Namespace) -> RunConfig:
-    adapter, objective, training, domains = cfg.adapter, cfg.objective, cfg.training, cfg.domains
+    adapter, objective, training, domains = (
+        cfg.adapter,
+        cfg.objective,
+        cfg.training,
+        cfg.domains,
+    )
     if args.rank is not None:
         adapter = replace(adapter, rank=args.rank)
     if args.eta_z is not None:
@@ -109,10 +137,14 @@ def apply_overrides(cfg: RunConfig, args: argparse.Namespace) -> RunConfig:
         if args.eval_batches < 1:
             raise ValueError(f"eval_batches must be >= 1, got {args.eval_batches}")
         training = replace(training, eval_batches=args.eval_batches)
-    return replace(cfg, adapter=adapter, objective=objective, training=training, domains=domains)
+    return replace(
+        cfg, adapter=adapter, objective=objective, training=training, domains=domains
+    )
 
 
-def evaluate_deployment(substrate, model: A3Model, params, eval_batches, *, jit: bool = True):
+def evaluate_deployment(
+    substrate, model: A3Model, params, eval_batches, *, jit: bool = True
+):
     """Label-free deployment (z = f_phi(h0), no inference): same metrics as A1's ``evaluate``."""
     if not eval_batches:
         return {"base_loss": 0.0, "base_ppl": 1.0, "loss": 0.0, "ppl": 1.0, "kl": 0.0}
@@ -126,7 +158,7 @@ def evaluate_deployment(substrate, model: A3Model, params, eval_batches, *, jit:
 
     step = jax.jit(_step) if jit else _step
     rows = [tuple(float(v) for v in step(params, ids)) for ids in eval_batches]
-    base_loss, loss, kl = (float(np.mean(col)) for col in zip(*rows))
+    base_loss, loss, kl = (float(np.mean(col)) for col in zip(*rows, strict=False))
     return {
         "base_loss": base_loss,
         "base_ppl": float(perplexity(base_loss)),
@@ -136,8 +168,16 @@ def evaluate_deployment(substrate, model: A3Model, params, eval_batches, *, jit:
     }
 
 
-def train_sequential(substrate, model: A3Model, params, domains, training: TrainingConfig,
-                     writer: RunWriter, *, energy_curve: bool = False):
+def train_sequential(
+    substrate,
+    model: A3Model,
+    params,
+    domains,
+    training: TrainingConfig,
+    writer: RunWriter,
+    *,
+    energy_curve: bool = False,
+):
     """Sequential-domain loop with A1's schedule, logging and artifacts. The gradient is the
     local predictive-coding gradient from ``model.train_grads``, not ``jax.grad``."""
     names = [d.name for d in domains]
@@ -145,14 +185,23 @@ def train_sequential(substrate, model: A3Model, params, domains, training: Train
     def eval_all(after_task: int):
         row = {}
         for d in domains:
-            row[d.name] = evaluate_deployment(substrate, model, params, d.eval_set, jit=training.jit)
+            row[d.name] = evaluate_deployment(
+                substrate, model, params, d.eval_set, jit=training.jit
+            )
             writer.log("eval", after_task=after_task, domain=d.name, **row[d.name])
         if after_task < 0:
-            log.info("[Validation] Baseline zero-shot eval after_task=%d: %s",
-                     after_task, _fmt_losses(row))
+            log.info(
+                "[Validation] Baseline zero-shot eval after_task=%d: %s",
+                after_task,
+                _fmt_losses(row),
+            )
         else:
-            log.info("[Validation] eval after_task=%d (%s): %s",
-                     after_task, domains[after_task].name, _fmt_losses(row))
+            log.info(
+                "[Validation] eval after_task=%d (%s): %s",
+                after_task,
+                domains[after_task].name,
+                _fmt_losses(row),
+            )
         return row
 
     init = eval_all(-1)
@@ -189,11 +238,17 @@ def train_sequential(substrate, model: A3Model, params, domains, training: Train
                 f"Domain {domain.name!r} has {len(domain.train_blocks)} blocks, "
                 f"which cannot fill batch_size={training.batch_size}."
             )
-        batches_per_epoch = len(domain.train_blocks) // training.batch_size if num_epochs > 0 else 0
+        batches_per_epoch = (
+            len(domain.train_blocks) // training.batch_size if num_epochs > 0 else 0
+        )
         log.info("=" * 78)
         log.info(
             ">>> DOMAIN [%d/%d]: '%s' | Epochs: %d | Batches/Epoch: %d (Total: %d)",
-            t + 1, len(domains), domain.name, num_epochs, batches_per_epoch,
+            t + 1,
+            len(domains),
+            domain.name,
+            num_epochs,
+            batches_per_epoch,
             batches_per_epoch * num_epochs,
         )
         log.info("=" * 78)
@@ -205,8 +260,11 @@ def train_sequential(substrate, model: A3Model, params, domains, training: Train
             epoch_step_times: list[float] = []
             epoch_scalars: list[dict[str, float]] = []
             epoch_tokens = 0
-            stream = batches(domain.train_blocks, training.batch_size,
-                             training.seed + t * 10000 + (epoch - 1))
+            stream = batches(
+                domain.train_blocks,
+                training.batch_size,
+                training.seed + t * 10000 + (epoch - 1),
+            )
 
             for batch_idx, ids in enumerate(stream, start=1):
                 domain_step += 1
@@ -226,45 +284,90 @@ def train_sequential(substrate, model: A3Model, params, domains, training: Train
                 metrics = {f"loss_{k}": v for k, v in scalars.items()}
                 metrics["ppl"] = float(perplexity(scalars["task"]))
                 writer.log(
-                    "train", task=t, domain=domain.name, epoch=epoch, batch=batch_idx,
-                    step=domain_step, global_step=global_step, tokens=tokens,
-                    step_time=step_time, **metrics,
+                    "train",
+                    task=t,
+                    domain=domain.name,
+                    epoch=epoch,
+                    batch=batch_idx,
+                    step=domain_step,
+                    global_step=global_step,
+                    tokens=tokens,
+                    step_time=step_time,
+                    **metrics,
                 )
-                if (batch_idx == 1 or batch_idx == batches_per_epoch
-                        or domain_step % training.log_every == 0):
-                    log.info("  Batch %d/%d %s  ppl=%.2f", batch_idx, batches_per_epoch,
-                             _fmt_terms(scalars), metrics["ppl"])
+                if (
+                    batch_idx == 1
+                    or batch_idx == batches_per_epoch
+                    or domain_step % training.log_every == 0
+                ):
+                    log.info(
+                        "  Batch %d/%d %s  ppl=%.2f",
+                        batch_idx,
+                        batches_per_epoch,
+                        _fmt_terms(scalars),
+                        metrics["ppl"],
+                    )
 
             if epoch_scalars:
                 duration = float(time.time() - epoch_start)
-                mean_terms = {k: float(np.mean([s[k] for s in epoch_scalars]))
-                              for k in epoch_scalars[0]}
+                mean_terms = {
+                    k: float(np.mean([s[k] for s in epoch_scalars]))
+                    for k in epoch_scalars[0]
+                }
                 mean_time = float(np.mean(epoch_step_times))
                 epoch_ppl = float(perplexity(mean_terms["task"]))
                 writer.log(
-                    "epoch", task=t, domain=domain.name, epoch=epoch, total_epochs=num_epochs,
-                    global_step=global_step, batches=len(epoch_scalars),
-                    blocks=len(epoch_scalars) * training.batch_size, epoch_tokens=epoch_tokens,
-                    tokens=tokens, epoch_time=duration, mean_step_time=mean_time,
-                    ppl=epoch_ppl, **{f"loss_{k}": v for k, v in mean_terms.items()},
+                    "epoch",
+                    task=t,
+                    domain=domain.name,
+                    epoch=epoch,
+                    total_epochs=num_epochs,
+                    global_step=global_step,
+                    batches=len(epoch_scalars),
+                    blocks=len(epoch_scalars) * training.batch_size,
+                    epoch_tokens=epoch_tokens,
+                    tokens=tokens,
+                    epoch_time=duration,
+                    mean_step_time=mean_time,
+                    ppl=epoch_ppl,
+                    **{f"loss_{k}": v for k, v in mean_terms.items()},
                 )
                 log.info(
                     "  Epoch %d/%d Finished | Duration: %.2fs (avg %.3fs/batch) | %s | ppl=%.2f",
-                    epoch, num_epochs, duration, mean_time, _fmt_terms(mean_terms), epoch_ppl,
+                    epoch,
+                    num_epochs,
+                    duration,
+                    mean_time,
+                    _fmt_terms(mean_terms),
+                    epoch_ppl,
                 )
 
         writer.save_checkpoint(
-            f"task_{t}_{domain.name}", model.adapter_params(params), opt_state=opt_state,
-            global_step=global_step, task=t, domain=domain.name, epoch=num_epochs, step=domain_step,
+            f"task_{t}_{domain.name}",
+            model.adapter_params(params),
+            opt_state=opt_state,
+            global_step=global_step,
+            task=t,
+            domain=domain.name,
+            epoch=num_epochs,
+            step=domain_step,
         )
-        log.info("Checkpoint saved: task_%d_%s (global_step=%d)", t, domain.name, global_step)
+        log.info(
+            "Checkpoint saved: task_%d_%s (global_step=%d)", t, domain.name, global_step
+        )
         rows.append(eval_all(t))
 
         if energy_curve and domain.eval_set:
-            curve = model.energy_curve(params, domain.eval_set[0], jax.random.fold_in(base_key, 0))
+            curve = model.energy_curve(
+                params, domain.eval_set[0], jax.random.fold_in(base_key, 0)
+            )
             writer.log("energy_curve", after_task=t, domain=domain.name, curve=curve)
-            log.info("[Energy] after_task=%d (%s): %s", t, domain.name,
-                     " -> ".join(f"{e:.4f}" for e in curve))
+            log.info(
+                "[Energy] after_task=%d (%s): %s",
+                t,
+                domain.name,
+                " -> ".join(f"{e:.4f}" for e in curve),
+            )
 
     summary = summarize(names, init, rows)
     summary.update(
@@ -276,8 +379,16 @@ def train_sequential(substrate, model: A3Model, params, domains, training: Train
     return params, summary
 
 
-def run_one(cfg: RunConfig, args, substrate, adapter, domains, n_frozen: int,
-            run_name: str, start_time: float) -> int:
+def run_one(
+    cfg: RunConfig,
+    args,
+    substrate,
+    adapter,
+    domains,
+    n_frozen: int,
+    run_name: str,
+    start_time: float,
+) -> int:
     train_cfg, obj = cfg.training, cfg.objective
     arch = substrate.architecture
     model = A3Model(
@@ -311,29 +422,51 @@ def run_one(cfg: RunConfig, args, substrate, adapter, domains, n_frozen: int,
             },
         )
         log_experiment_header(
-            log, cfg=cfg, arch=arch, adapter=adapter, n_trainable=n_trainable,
-            n_frozen=n_frozen, run_dir=writer.dir, domains=domains,
-            title="STAGE A3: PREDICTIVE-CODING LATENT RESIDUAL TRAINING",
+            log,
+            cfg=cfg,
+            arch=arch,
+            adapter=adapter,
+            n_trainable=n_trainable,
+            n_frozen=n_frozen,
+            run_dir=writer.dir,
+            domains=domains,
         )
         log.info(
             "Predictive coding  : K=%d | eta_z=%s | sigma2=%s | lambda_kl=%s",
-            obj.infer_steps, obj.eta_z, obj.sigma2, obj.lambda_kl,
+            obj.infer_steps,
+            obj.eta_z,
+            obj.sigma2,
+            obj.lambda_kl,
         )
         log.info("-" * 78)
 
         params, summary = train_sequential(
-            substrate, model, params, domains, train_cfg, writer, energy_curve=args.energy_curve
+            substrate,
+            model,
+            params,
+            domains,
+            train_cfg,
+            writer,
+            energy_curve=args.energy_curve,
         )
         frozen = substrate.verify_frozen()
         summary["params_unchanged"] = frozen["params_unchanged"]
         summary["infer_steps"] = obj.infer_steps
 
-        log.info("Running final %s evaluation across %d domains...", args.split, len(cfg.domains))
+        log.info(
+            "Running final %s evaluation across %d domains...",
+            args.split,
+            len(cfg.domains),
+        )
         test_results = {}
         for d in cfg.domains:
-            split_name = {"test": d.test_split, "train": d.train_split}.get(args.split, d.eval_split)
+            split_name = {"test": d.test_split, "train": d.train_split}.get(
+                args.split, d.eval_split
+            )
             blocks = load_token_blocks(substrate, d, split_name, train_cfg.seq_len)
-            test_set = make_eval_set(blocks, train_cfg.batch_size, train_cfg.eval_batches)
+            test_set = make_eval_set(
+                blocks, train_cfg.batch_size, train_cfg.eval_batches
+            )
             test_results[d.name] = evaluate_deployment(
                 substrate, model, params, test_set, jit=train_cfg.jit
             )
@@ -360,7 +493,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     max_pos = arch.max_position_embeddings
     if max_pos is not None and train_cfg.seq_len > max_pos:
         raise ValueError(f"seq_len={train_cfg.seq_len} exceeds {max_pos} positions.")
-    adapter = ResidualAdapter(cfg.adapter, arch)  # late-block selection and scale, as in A1
+    adapter = ResidualAdapter(
+        cfg.adapter, arch
+    )  # late-block selection and scale, as in A1
     n_frozen = sum(p.numel() for p in substrate.params.values())
 
     frozen = substrate.verify_frozen()
@@ -377,7 +512,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             Domain(
                 name=d.name,
                 train_blocks=train_blocks,
-                eval_set=make_eval_set(eval_blocks, train_cfg.batch_size, train_cfg.eval_batches),
+                eval_set=make_eval_set(
+                    eval_blocks, train_cfg.batch_size, train_cfg.eval_batches
+                ),
                 epochs=train_cfg.epochs if d.epochs is None else d.epochs,
             )
         )
@@ -388,7 +525,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     for k in ks:
         run_cfg = replace(cfg, objective=replace(cfg.objective, infer_steps=k))
         run_name = base_name if len(ks) == 1 else f"{base_name}-K{k}"
-        status |= run_one(run_cfg, args, substrate, adapter, domains, n_frozen, run_name, start_time)
+        status |= run_one(
+            run_cfg, args, substrate, adapter, domains, n_frozen, run_name, start_time
+        )
     return status
 
 
