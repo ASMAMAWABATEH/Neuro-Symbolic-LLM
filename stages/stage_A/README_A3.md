@@ -27,7 +27,9 @@ residual flows through later layers as part of the live model computation.
 
 At deployment, the model uses \(z_l=\sigma(h_l^0 A_l)\) without iterative inference or labels.
 When `lambda_kl` is positive, baseline log-probabilities are obtained during the clean pass and
-provided to the graph as data, avoiding a separate baseline forward pass inside the tail.
+provided to the graph as data, avoiding a separate baseline forward pass inside the tail. The KL
+term uses the same \(T-1\) next-token prediction positions as the task loss, with cached baseline
+log-probabilities aligned to those positions.
 
 ## FabricPC Implementation vs. Manual Reference
 
@@ -131,6 +133,8 @@ The module skips when `fabricpc.graph_assembly` is unavailable. Tests cover:
 - predictor initialization and \(K\)-step latent updates against hand-computed equations;
 - exact energy at the final latent and the stale-energy regression;
 - gradient values against closed forms and autodiff, plus propagation through selected layers;
-- KL energy and use of cached baseline outputs;
+- KL energy and use of cached baseline outputs, including alignment to the \(T-1\) next-token
+  prediction positions;
 - frozen substrate parameter immutability during optimization;
-- deployment behavior, residual wiring, and invalid configuration/input handling.
+- deployment behavior, residual wiring, and invalid configuration/input handling, including
+  initialization-time checks for required `ids` and `base_logp` edges and compatible shapes.
