@@ -21,16 +21,16 @@ What the node does
 
 The substrate is bound to a subclass by make_frozen_tail(), so no object lives in the node config.
 """
+
 from __future__ import annotations
 
 import math
 import re
 from numbers import Integral, Real
-from typing import Any, Dict
+from typing import Any
 
 import jax
 import jax.numpy as jnp
-
 from fabricpc.core.activations import IdentityActivation
 from fabricpc.core.energy import CrossEntropyEnergy
 from fabricpc.core.initializers import NormalInitializer, initialize
@@ -46,7 +46,9 @@ def _is_int(value: Any) -> bool:
 
 
 def _check_real(label: str, value: Any, *, allow_zero: bool) -> float:
-    ok = isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)
+    ok = (
+        isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)
+    )
     if not ok or value < 0 or (value == 0 and not allow_zero):
         relation = ">= 0" if allow_zero else "> 0"
         raise ValueError(f"{label} must be a finite number {relation}, got {value!r}")
@@ -83,7 +85,9 @@ def _z_edges(keys) -> dict[int, str]:
         if key.endswith(":z"):
             layer = layer_of(key)
             if layer in edges:
-                raise ValueError(f"duplicate z edge for layer {layer}: {edges[layer]!r}, {key!r}")
+                raise ValueError(
+                    f"duplicate z edge for layer {layer}: {edges[layer]!r}, {key!r}"
+                )
             edges[layer] = key
     return edges
 
@@ -106,7 +110,9 @@ def _split_inputs(inputs, layers, use_base):
     if ids is None:
         raise ValueError("FrozenTail requires an incoming :ids edge")
     if ids.ndim != 2 or ids.shape[1] < 2:
-        raise ValueError(f"ids must have shape [batch, seq >= 2], got {tuple(ids.shape)}")
+        raise ValueError(
+            f"ids must have shape [batch, seq >= 2], got {tuple(ids.shape)}"
+        )
     if not jnp.issubdtype(ids.dtype, jnp.integer):
         raise TypeError(f"ids must have an integer dtype, got {ids.dtype}")
     for layer, key in z_keys.items():
@@ -117,7 +123,9 @@ def _split_inputs(inputs, layers, use_base):
                 f"{tuple(ids.shape)}, got {tuple(z.shape)}"
             )
     if use_base and base_logp is None:
-        raise ValueError("lambda_kl > 0 requires base log-probabilities on the :base_logp edge")
+        raise ValueError(
+            "lambda_kl > 0 requires base log-probabilities on the :base_logp edge"
+        )
     z_by_layer = {layer: (key, inputs[key]) for layer, key in z_keys.items()}
     return z_by_layer, ids, (base_logp if use_base else None)
 
@@ -127,7 +135,8 @@ def residual_modify(z, projections, scale):
 
     Adds scale * z_l @ B_l to the LIVE hidden state of each layer in ``z`` (computed in float32,
     cast back to the hidden dtype). Layers not in ``z`` pass through unchanged. Used by the tail
-    and by the model's deployment and exact-energy passes, so all three apply one rule."""
+    and by the model's deployment and exact-energy passes, so all three apply one rule.
+    """
     scale = _check_real("scale", scale, allow_zero=False)
 
     def modify(hidden, layer_idx):
@@ -160,25 +169,62 @@ def residual_modify(z, projections, scale):
 class FrozenTail(NodeBase):
     _substrate: Any = None  # bound by make_frozen_tail()
 
-    def __init__(self, shape, name, *, layers, hidden_size, scale=1.0, projection_scale=0.01,
-                 lambda_kl=0.0, activation=None, energy=None, latent_init=None, weight_init=None):
+    def __init__(
+        self,
+        shape,
+        name,
+        *,
+        layers,
+        hidden_size,
+        scale=1.0,
+        projection_scale=0.01,
+        lambda_kl=0.0,
+        activation=None,
+        energy=None,
+        latent_init=None,
+        weight_init=None,
+    ):
         layers = _check_layers(layers)
+        try:
+            shape = tuple(shape)
+        except TypeError as exc:
+            raise ValueError("FrozenTail shape must be [sequence, vocabulary]") from exc
+        if len(shape) != 2 or not all(_is_int(size) and size > 0 for size in shape):
+            raise ValueError(
+                f"FrozenTail shape must be [sequence, vocabulary], got {shape}"
+            )
+        sub = type(self)._substrate
+        if sub is not None and shape[1] != sub.architecture.vocab_size:
+            raise ValueError(
+                f"FrozenTail vocabulary size {shape[1]} does not match substrate "
+                f"vocabulary size {sub.architecture.vocab_size}"
+            )
         if not _is_int(hidden_size) or hidden_size <= 0:
-            raise ValueError(f"hidden_size must be a positive integer, got {hidden_size!r}")
+            raise ValueError(
+                f"hidden_size must be a positive integer, got {hidden_size!r}"
+            )
         scale = _check_real("scale", scale, allow_zero=False)
-        projection_scale = _check_real("projection_scale", projection_scale, allow_zero=False)
+        projection_scale = _check_real(
+            "projection_scale", projection_scale, allow_zero=False
+        )
         lambda_kl = _check_real("lambda_kl", lambda_kl, allow_zero=True)
         # `energy` is only the declared label: the node overrides energy() below.
         super().__init__(
-            shape=shape, name=name,
+            shape=shape,
+            name=name,
             activation=activation or IdentityActivation(),
             energy=energy or CrossEntropyEnergy(),
             latent_init=latent_init or NormalInitializer(),
-            weight_init=weight_init or NormalInitializer(mean=0.0, std=projection_scale),
-            layers=layers, hidden_size=int(hidden_size), scale=scale, lambda_kl=lambda_kl)
+            weight_init=weight_init
+            or NormalInitializer(mean=0.0, std=projection_scale),
+            layers=layers,
+            hidden_size=int(hidden_size),
+            scale=scale,
+            lambda_kl=lambda_kl,
+        )
 
     @staticmethod
-    def get_slots() -> Dict[str, SlotSpec]:
+    def get_slots() -> dict[str, SlotSpec]:
         return {
             "z": SlotSpec(name="z", is_multi_input=True),
             "ids": SlotSpec(name="ids", is_multi_input=False),
@@ -186,10 +232,33 @@ class FrozenTail(NodeBase):
         }
 
     @staticmethod
-    def initialize_params(key, node_shape, input_shapes, weight_init, config) -> NodeParams:
+    def initialize_params(
+        key, node_shape, input_shapes, weight_init, config
+    ) -> NodeParams:
         """One B_l [r, d] per z edge, small and random (never zero: with B = 0 the gradient on z
         is exactly zero and inference could not move z)."""
         d = int(config["hidden_size"])
+        ids_keys = [key for key in input_shapes if key.endswith(":ids")]
+        if len(ids_keys) != 1:
+            raise ValueError("FrozenTail requires exactly one incoming :ids edge")
+        ids_shape = tuple(input_shapes[ids_keys[0]])
+        if len(ids_shape) != 1 or ids_shape[0] < 2:
+            raise ValueError(f"ids input must have shape [seq >= 2], got {ids_shape}")
+        if len(node_shape) != 2 or node_shape[0] != ids_shape[0] - 1:
+            raise ValueError(
+                f"FrozenTail output shape {tuple(node_shape)} must have "
+                f"sequence length {ids_shape[0] - 1}"
+            )
+
+        base_keys = [key for key in input_shapes if key.endswith(":base_logp")]
+        if float(config["lambda_kl"]) > 0.0 and len(base_keys) != 1:
+            raise ValueError("lambda_kl > 0 requires an incoming :base_logp edge")
+        if base_keys and tuple(input_shapes[base_keys[0]]) != tuple(node_shape):
+            raise ValueError(
+                f"base_logp shape {tuple(input_shapes[base_keys[0]])} must match "
+                f"FrozenTail output shape {tuple(node_shape)}"
+            )
+
         z_keys = _z_edges(input_shapes)
         if set(z_keys) != set(config["layers"]):
             raise ValueError(
@@ -197,10 +266,13 @@ class FrozenTail(NodeBase):
             )
         weights = {}
         subkeys = jax.random.split(key, len(z_keys))
-        for subkey, layer in zip(subkeys, sorted(z_keys)):
+        for subkey, layer in zip(subkeys, sorted(z_keys), strict=False):
             z_shape = tuple(input_shapes[z_keys[layer]])
-            if len(z_shape) != 2 or z_shape[-1] <= 0:
-                raise ValueError(f"z input for layer {layer} must be [T, rank>0], got {z_shape}")
+            if len(z_shape) != 2 or z_shape[0] != ids_shape[0] or z_shape[-1] <= 0:
+                raise ValueError(
+                    f"z input for layer {layer} must be "
+                    f"[{ids_shape[0]}, rank>0], got {z_shape}"
+                )
             weights[z_keys[layer]] = initialize(subkey, (z_shape[-1], d), weight_init)
         return NodeParams(weights=weights, biases={})
 
@@ -208,7 +280,9 @@ class FrozenTail(NodeBase):
     def predict(params, inputs, state, node_info):
         sub = node_info.node_class._substrate
         if sub is None:
-            raise RuntimeError("FrozenTail has no substrate; build it with make_frozen_tail()")
+            raise RuntimeError(
+                "FrozenTail has no substrate; build it with make_frozen_tail()"
+            )
         cfg = node_info.node_config
         layers = tuple(cfg["layers"])
         use_base = float(cfg["lambda_kl"]) > 0.0
@@ -216,12 +290,14 @@ class FrozenTail(NodeBase):
         ids = ids.astype(jnp.int32)
 
         modify = residual_modify(
-            {l: z for l, (_, z) in z_by_layer.items()},
-            {l: params.weights[key] for l, (key, _) in z_by_layer.items()},
+            {layer: z for layer, (_, z) in z_by_layer.items()},
+            {layer: params.weights[key] for layer, (key, _) in z_by_layer.items()},
             float(cfg["scale"]),
         )
         # The only substrate forward in this node: residuals enter through modify_fn.
-        logits = sub.run_with_interception(ids, modify_fn=modify, intercept_layers=layers).logits
+        logits = sub.run_with_interception(
+            ids, modify_fn=modify, intercept_layers=layers
+        ).logits
         if logits.ndim != 3 or logits.shape[:2] != ids.shape:
             raise ValueError(
                 f"substrate logits must be [batch, seq, vocab] matching ids {tuple(ids.shape)}, "
@@ -271,7 +347,8 @@ class FrozenTail(NodeBase):
             return jnp.sum(new_s.energy), new_s
 
         (_, new_state), (z_grads, self_grad) = jax.value_and_grad(
-            energy_fn, argnums=(0, 1), has_aux=True)(z_inputs, state.z_latent)
+            energy_fn, argnums=(0, 1), has_aux=True
+        )(z_inputs, state.z_latent)
         input_grads = dict(z_grads)
         for key, value in fixed.items():  # ids and base_logp are data: no gradient
             input_grads[key] = jnp.zeros(value.shape, jnp.float32)
@@ -280,8 +357,12 @@ class FrozenTail(NodeBase):
 
 def make_frozen_tail(substrate):
     """FrozenTail class bound to a substrate (anything with run_with_interception)."""
-    if substrate is None or not callable(getattr(substrate, "run_with_interception", None)):
-        raise TypeError("make_frozen_tail requires a substrate with run_with_interception(...)")
+    if substrate is None or not callable(
+        getattr(substrate, "run_with_interception", None)
+    ):
+        raise TypeError(
+            "make_frozen_tail requires a substrate with run_with_interception(...)"
+        )
     return type("FrozenTail", (FrozenTail,), {"_substrate": substrate})
 
 
