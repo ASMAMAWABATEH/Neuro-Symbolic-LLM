@@ -24,6 +24,7 @@ import pytest
 
 pytest.importorskip("fabricpc.graph_assembly", reason="A3 needs FabricPC >= 0.6")
 
+# Keep FabricPC imports after importorskip so unavailable versions skip this module cleanly.
 from fabricpc.core.inference import run_inference  # noqa: E402
 from fabricpc.core.initializers import NormalInitializer  # noqa: E402
 from fabricpc.graph_initialization.state_initializer import (  # noqa: E402
@@ -34,7 +35,12 @@ from fabricpc.training.trainer import build_clamps  # noqa: E402
 from frozenllm.substrate import identity_modify  # noqa: E402
 from stages.stage_A.A3_model import A3Config, A3Model  # noqa: E402
 from stages.stage_A.a3_tail import make_frozen_tail, residual_modify  # noqa: E402
-from tests.frozenllm.conftest import BATCH, NUM_TOKENS, SEQ, make_substrate  # noqa: E402
+from tests.frozenllm.conftest import (  # noqa: E402
+    BATCH,
+    NUM_TOKENS,
+    SEQ,
+    make_substrate,
+)
 
 LAYERS = (6, 7)
 RANK = 4
@@ -63,12 +69,14 @@ def make_ref(sub, model, seed=0):
     rng = np.random.default_rng(seed)
     ids = jnp.asarray(rng.integers(0, NUM_TOKENS, (BATCH, SEQ)), dtype=jnp.int32)
     h0, base = model.clean_pass(ids)
-    return SimpleNamespace(sub=sub, model=model, params=params, ids=ids, h0=h0, base=base)
+    return SimpleNamespace(
+        sub=sub, model=model, params=params, ids=ids, h0=h0, base=base
+    )
 
 
 def b_of(ref, params=None):
     p = ref.params if params is None else params
-    return {l: ref.model.projection(p, l) for l in LAYERS}
+    return {layer: ref.model.projection(p, layer) for layer in LAYERS}
 
 
 def loss_at(ref, z, b=None, lam=0.0, probe=None):
@@ -82,20 +90,18 @@ def loss_at(ref, z, b=None, lam=0.0, probe=None):
     logits = ref.sub.run_with_interception(
         ref.ids, modify_fn=modify, intercept_layers=LAYERS
     ).logits
-    if lam > 0:
-        return ref.sub.compute_loss(
-            logits,
-            ref.ids,
-            losses=("CE", "KL"),
-            base_logits=ref.base,
-            weights={"KL": lam},
-        )
-    return ref.sub.compute_loss(logits, ref.ids, losses=("CE",))
+    ce = ref.sub.compute_loss(logits, ref.ids, losses=("CE",))
+    if lam <= 0:
+        return ce
+    kl = ref.sub.compute_loss(
+        logits[:, :-1], None, losses=("KL",), base_logits=ref.base[:, :-1]
+    )
+    return ce + lam * kl
 
 
 def delta_mean(ref, z, lam=0.0):
     """Gradient of the token-mean loss at h~_l (total derivative, via a zero probe)."""
-    probe0 = {l: jnp.zeros_like(ref.h0[l]) for l in LAYERS}
+    probe0 = {layer: jnp.zeros_like(ref.h0[layer]) for layer in LAYERS}
     return jax.grad(lambda p: loss_at(ref, z, lam=lam, probe=p))(probe0)
 
 
@@ -106,14 +112,16 @@ def settle_by_hand(ref, k, lam=0.0):
     for _ in range(k):
         d = delta_mean(ref, z, lam)
         z = {
-            l: z[l] - ETA * (s * ((N * d[l]) @ b_of(ref)[l].T) + PREC * (z[l] - f[l]))
-            for l in LAYERS
+            layer: z[layer]
+            - ETA
+            * (s * ((N * d[layer]) @ b_of(ref)[layer].T) + PREC * (z[layer] - f[layer]))
+            for layer in LAYERS
         }
     return z, f
 
 
 def engine_start(ref):
-    batch, _ = ref.model.make_batch(ref.ids)
+    batch, _, _ = ref.model.make_batch(ref.ids)
     clamps = build_clamps(batch, ref.model.structure, clamp_target=True)
     state = initialize_graph_state(
         ref.model.structure, BATCH, jax.random.PRNGKey(1), clamps, params=ref.params
@@ -149,38 +157,40 @@ def test_cached_hidden_states_come_from_the_substrate_cache(env):
         return h
 
     env.sub.run_with_interception(env.ids, modify_fn=spy, intercept_layers=LAYERS)
-    batch, _ = env.model.make_batch(env.ids)
-    for l in LAYERS:
-        np.testing.assert_allclose(env.h0[l], cached.hidden_state(l), atol=1e-6)
-        np.testing.assert_allclose(env.h0[l], seen[l], atol=1e-6)  # pristine: hook saw the same
-        np.testing.assert_allclose(batch[f"h0_{l}"], env.h0[l], atol=1e-6)
+    batch, _, _ = env.model.make_batch(env.ids)
+    for layer in LAYERS:
+        np.testing.assert_allclose(env.h0[layer], cached.hidden_state(layer), atol=1e-6)
+        np.testing.assert_allclose(
+            env.h0[layer], seen[layer], atol=1e-6
+        )  # pristine: hook saw the same
+        np.testing.assert_allclose(batch[f"h0_{layer}"], env.h0[layer], atol=1e-6)
     np.testing.assert_allclose(env.base, cached.logits, atol=1e-6)
 
 
 def test_cached_hidden_states_survive_jit(env):
     h0, base = jax.jit(env.model.clean_pass)(env.ids)
-    for l in LAYERS:
-        np.testing.assert_allclose(h0[l], env.h0[l], atol=1e-4)
+    for layer in LAYERS:
+        np.testing.assert_allclose(h0[layer], env.h0[layer], atol=1e-4)
     np.testing.assert_allclose(base, env.base, atol=1e-4)
 
 
 def test_z0_is_the_predictor_applied_to_cached_h0(env):
     _, state0 = engine_start(env)
     f = env.model.predict_latents(env.params, env.h0)
-    for l in LAYERS:
-        np.testing.assert_allclose(state0.nodes[f"z{l}"].z_latent, f[l], **TOL)
-        np.testing.assert_allclose(state0.nodes[f"z{l}"].energy, 0.0, atol=1e-6)
+    for layer in LAYERS:
+        np.testing.assert_allclose(state0.nodes[f"z{layer}"].z_latent, f[layer], **TOL)
+        np.testing.assert_allclose(state0.nodes[f"z{layer}"].energy, 0.0, atol=1e-6)
 
 
 def test_parameters_use_the_a1_layout(env):
     d = env.model.hidden_size
-    for l in LAYERS:
-        assert env.model.predictor_weight(env.params, l).shape == (d, RANK)
-        assert env.model.projection(env.params, l).shape == (RANK, d)
-        assert float(jnp.abs(env.model.projection(env.params, l)).max()) > 0
+    for layer in LAYERS:
+        assert env.model.predictor_weight(env.params, layer).shape == (d, RANK)
+        assert env.model.projection(env.params, layer).shape == (RANK, d)
+        assert float(jnp.abs(env.model.projection(env.params, layer)).max()) > 0
     assert len(jax.tree_util.tree_leaves(env.params)) == 2 * len(LAYERS)
     adapter = env.model.adapter_params(env.params)
-    assert set(adapter) == {f"layer_{l}" for l in LAYERS}
+    assert set(adapter) == {f"layer_{layer}" for layer in LAYERS}
     assert all(set(v) == {"A", "B"} for v in adapter.values())
 
 
@@ -189,9 +199,13 @@ def test_k_step_inference_matches_the_a3_equation(env):
     clamps, state0 = engine_start(env)
     state = run_inference(env.params, state0, clamps, env.model.structure)
     z_hand, f = settle_by_hand(env, K)
-    for l in LAYERS:
-        np.testing.assert_allclose(state.nodes[f"z{l}"].z_latent, z_hand[l], **TOL)
-    assert max(float(jnp.abs(z_hand[l] - f[l]).max()) for l in LAYERS) > 1e-5  # z moved
+    for layer in LAYERS:
+        np.testing.assert_allclose(
+            state.nodes[f"z{layer}"].z_latent, z_hand[layer], **TOL
+        )
+    assert (
+        max(float(jnp.abs(z_hand[layer] - f[layer]).max()) for layer in LAYERS) > 1e-5
+    )  # z moved
 
 
 def test_one_step_from_z0_has_no_spring_force(substrate):
@@ -200,15 +214,24 @@ def test_one_step_from_z0_has_no_spring_force(substrate):
     clamps, state0 = engine_start(ref)
     state = run_inference(ref.params, state0, clamps, model.structure)
     z_hand, f = settle_by_hand(ref, 1)
-    for l in LAYERS:  # at z = f the spring gradient is 0: only the task gradient moves z
-        np.testing.assert_allclose(state.nodes[f"z{l}"].z_latent, z_hand[l], **TOL)
+    for (
+        layer
+    ) in LAYERS:  # at z = f the spring gradient is 0: only the task gradient moves z
+        np.testing.assert_allclose(
+            state.nodes[f"z{layer}"].z_latent, z_hand[layer], **TOL
+        )
 
 
 # --------------------------------------------------------------------- final-state energy
 def test_final_state_energy_is_exact(env, trained):
     _, aux = trained
     z, f = aux["z_star"], env.model.predict_latents(env.params, env.h0)
-    spring = 0.5 * PREC * sum(float(jnp.sum((z[l] - f[l]) ** 2)) for l in LAYERS) / N
+    spring = (
+        0.5
+        * PREC
+        * sum(float(jnp.sum((z[layer] - f[layer]) ** 2)) for layer in LAYERS)
+        / N
+    )
     hand = spring + float(loss_at(env, z))
     np.testing.assert_allclose(aux["energy_after"], hand, **TOL)
     np.testing.assert_allclose(aux["spring"], spring, **TOL)
@@ -235,16 +258,28 @@ def test_local_gradients_match_closed_forms_and_autodiff(env, trained):
     z, f = aux["z_star"], aux["pred"]
     d = delta_mean(env, z)
     b = b_of(env)
-    for l in LAYERS:
-        g_b = grads.nodes["tail"].weights[f"z{l}->tail:z"]
-        closed = env.model.scale * jnp.einsum("btr,btd->rd", z[l], d[l])
+    for layer in LAYERS:
+        g_b = grads.nodes["tail"].weights[f"z{layer}->tail:z"]
+        closed = env.model.scale * jnp.einsum("btr,btd->rd", z[layer], d[layer])
         np.testing.assert_allclose(g_b, closed, **TOL)  # closed form
-        auto = jax.grad(lambda bl, l=l: loss_at(env, z, b={**b, l: bl}))(b[l])
-        np.testing.assert_allclose(g_b, auto, **TOL)  # = autodiff of A1's loss (substrate API)
+        auto = jax.grad(lambda bl, layer=layer: loss_at(env, z, b={**b, layer: bl}))(
+            b[layer]
+        )
+        np.testing.assert_allclose(
+            g_b, auto, **TOL
+        )  # = autodiff of A1's loss (substrate API)
 
-        g_a = grads.nodes[f"z{l}"].weights[f"h0_{l}->z{l}:in"]
+        g_a = grads.nodes[f"z{layer}"].weights[f"h0_{layer}->z{layer}:in"]
         np.testing.assert_allclose(  # local rule: needs no pass through the frozen model
-            g_a, -PREC * jnp.einsum("btd,btr->dr", env.h0[l], z[l] - f[l]) / N, **TOL
+            g_a,
+            -PREC
+            * jnp.einsum(
+                "btd,btr->dr",
+                env.h0[layer],
+                z[layer] - f[layer],
+            )
+            / N,
+            **TOL,
         )
 
 
@@ -253,9 +288,9 @@ def test_latent_gradient_reaches_z_through_the_frozen_layers(env):
     through the frozen blocks above each injection point."""
     f = env.model.predict_latents(env.params, env.h0)
     d = delta_mean(env, f)
-    for l in LAYERS:
-        assert float(jnp.abs(d[l]).max()) > 0
-        assert float(jnp.abs(d[l] @ b_of(env)[l].T).max()) > 0
+    for layer in LAYERS:
+        assert float(jnp.abs(d[layer]).max()) > 0
+        assert float(jnp.abs(d[layer] @ b_of(env)[layer].T).max()) > 0
 
 
 # --------------------------------------------------------------------- KL and baseline passes
@@ -269,9 +304,14 @@ def test_kl_term_uses_cached_base_logits_and_matches_the_equation(substrate):
     state = run_inference(ref.params, state0, clamps, model.structure)
     z_kl, _ = settle_by_hand(ref, K, lam)
     z_plain, _ = settle_by_hand(ref, K, 0.0)
-    for l in LAYERS:
-        np.testing.assert_allclose(state.nodes[f"z{l}"].z_latent, z_kl[l], **TOL)
-    assert max(float(jnp.abs(z_kl[l] - z_plain[l]).max()) for l in LAYERS) > 1e-5
+    for layer in LAYERS:
+        np.testing.assert_allclose(
+            state.nodes[f"z{layer}"].z_latent, z_kl[layer], **TOL
+        )
+    assert (
+        max(float(jnp.abs(z_kl[layer] - z_plain[layer]).max()) for layer in LAYERS)
+        > 1e-5
+    )
 
     _, aux = model.train_grads(ref.params, ref.ids, jax.random.PRNGKey(2))
     assert float(aux["kl"]) >= 0
@@ -314,17 +354,25 @@ def test_frozen_parameters_survive_a3_training(substrate):
 
     params = ref.params
     for i in range(3):
-        params, opt_state, grads, aux = step(params, opt_state, ref.ids, jax.random.PRNGKey(i))
+        params, opt_state, grads, aux = step(
+            params, opt_state, ref.ids, jax.random.PRNGKey(i)
+        )
 
     assert substrate.verify_frozen()["params_unchanged"]
     # Only the adapter matrices are trainable: no substrate weight is in the optimised tree.
     assert len(jax.tree_util.tree_leaves(params)) == 2 * len(LAYERS)
-    assert jax.tree_util.tree_structure(grads) == jax.tree_util.tree_structure(ref.params)
+    assert jax.tree_util.tree_structure(grads) == jax.tree_util.tree_structure(
+        ref.params
+    )
     assert all(bool(jnp.isfinite(g).all()) for g in jax.tree_util.tree_leaves(grads))
     assert all(getattr(p, "grad", None) is None for p in substrate.params.values())
     moved = max(
-        float(jnp.abs(model.projection(params, l) - model.projection(ref.params, l)).max())
-        for l in LAYERS
+        float(
+            jnp.abs(
+                model.projection(params, layer) - model.projection(ref.params, layer)
+            ).max()
+        )
+        for layer in LAYERS
     )
     assert moved > 0  # B trained
 
@@ -345,12 +393,12 @@ def test_deployed_model_uses_z_equal_predictor_of_cached_h0(env):
 # --------------------------------------------------------------------- validation
 def test_configuration_and_input_validation(substrate, env):
     for bad in (
-        dict(layers=(), rank=RANK, seq_len=SEQ),
-        dict(layers=(99,), rank=RANK, seq_len=SEQ),
-        dict(layers=LAYERS, rank=0, seq_len=SEQ),
-        dict(layers=LAYERS, rank=RANK, seq_len=1),
-        dict(layers=LAYERS, rank=RANK, seq_len=SEQ, activation="swish"),
-        dict(layers=LAYERS, rank=RANK, seq_len=SEQ, scale=0.0),
+        {"layers": (), "rank": RANK, "seq_len": SEQ},
+        {"layers": (99,), "rank": RANK, "seq_len": SEQ},
+        {"layers": LAYERS, "rank": 0, "seq_len": SEQ},
+        {"layers": LAYERS, "rank": RANK, "seq_len": 1},
+        {"layers": LAYERS, "rank": RANK, "seq_len": SEQ, "activation": "swish"},
+        {"layers": LAYERS, "rank": RANK, "seq_len": SEQ, "scale": 0.0},
     ):
         with pytest.raises(ValueError):
             A3Model(substrate, **bad)
@@ -380,11 +428,16 @@ def test_tail_wiring_validation(substrate, env):
         tail_cls.initialize_params(key, (SEQ - 1, 1), shapes, init, config)
     with pytest.raises(ValueError, match="ids"):
         tail_cls.initialize_params(
-            key, (SEQ - 1, 1), {k: v for k, v in shapes.items() if "ids" not in k}, init,
+            key,
+            (SEQ - 1, 1),
+            {k: v for k, v in shapes.items() if "ids" not in k},
+            init,
             {**config, "lambda_kl": 0.0},
         )
     with pytest.raises(ValueError):  # wrong node shape
-        tail_cls.initialize_params(key, (SEQ, 1), shapes, init, {**config, "lambda_kl": 0.0})
+        tail_cls.initialize_params(
+            key, (SEQ, 1), shapes, init, {**config, "lambda_kl": 0.0}
+        )
     with pytest.raises(ValueError):
         tail_cls(shape=(SEQ - 1, 2), name="tail", layers=LAYERS, hidden_size=d)
     with pytest.raises(ValueError):
