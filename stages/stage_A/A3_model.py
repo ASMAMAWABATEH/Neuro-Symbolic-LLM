@@ -28,6 +28,7 @@ flows through later layers. Training and deployment use the same rule.
 
 Optimisation and logging live in experiments/run_stage_a3.py.
 """
+
 from __future__ import annotations
 
 import math
@@ -52,7 +53,11 @@ from fabricpc.graph_assembly import TaskMap, graph
 from fabricpc.graph_initialization import initialize_params
 from fabricpc.graph_initialization.state_initializer import initialize_graph_state
 from fabricpc.nodes import IdentityNode, Linear
-from fabricpc.training.trainer import build_clamps, grad_denominator, pc_weight_gradients
+from fabricpc.training.trainer import (
+    build_clamps,
+    grad_denominator,
+    pc_weight_gradients,
+)
 
 from frozenllm.substrate import FrozenSubstrate, identity_modify
 from stages.stage_base import checked_kwargs
@@ -73,7 +78,9 @@ def _is_int(value: Any) -> bool:
 
 
 def _is_real(value: Any) -> bool:
-    return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)
+    return (
+        isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)
+    )
 
 
 def _require_positive(name: str, value: Any) -> None:
@@ -105,16 +112,22 @@ def _validate_layers(layers: Any, num_layers: int) -> tuple[int, ...]:
 class A3Config:
     """The ``objective:`` section of configs/stage_A/a3_true_pc.yaml."""
 
-    infer_steps: int = 2                # K, the plan sweeps {1, 2, 4, 8}
-    eta_z: float = 0.1                  # per-token inference step (stable below 2 / lambda_max)
-    sigma2: float = 1.0                 # the spring has precision 1 / sigma^2
-    lambda_kl: float = 0.0              # KL trust-region weight, as in A1; 0 = off
-    predictor_init_std: float = 0.001   # small: z^(0) starts near 0, so the model starts near base
-    projection_init_std: float = 0.1    # B must not be 0: grad_z E = B^T delta would vanish
+    infer_steps: int = 2  # K, the plan sweeps {1, 2, 4, 8}
+    eta_z: float = 0.1  # per-token inference step (stable below 2 / lambda_max)
+    sigma2: float = 1.0  # the spring has precision 1 / sigma^2
+    lambda_kl: float = 0.0  # KL trust-region weight, as in A1; 0 = off
+    predictor_init_std: float = (
+        0.001  # small: z^(0) starts near 0, so the model starts near base
+    )
+    projection_init_std: float = (
+        0.1  # B must not be 0: grad_z E = B^T delta would vanish
+    )
 
     def __post_init__(self) -> None:
         if not _is_int(self.infer_steps) or self.infer_steps < 0:
-            raise ValueError(f"infer_steps must be an integer >= 0, got {self.infer_steps!r}")
+            raise ValueError(
+                f"infer_steps must be an integer >= 0, got {self.infer_steps!r}"
+            )
         for name in ("eta_z", "sigma2", "predictor_init_std", "projection_init_std"):
             _require_positive(name, getattr(self, name))
         _require_nonnegative("lambda_kl", self.lambda_kl)
@@ -141,39 +154,51 @@ class A3Model:
             raise TypeError(f"config must be an A3Config, got {type(cfg).__name__}")
         arch = substrate.architecture
         if min(arch.num_layers, arch.hidden_size, arch.vocab_size) <= 0:
-            raise ValueError("substrate architecture must have positive layer, hidden and vocab sizes")
+            raise ValueError(
+                "substrate architecture must have positive layer, hidden and vocab sizes"
+            )
         layers = _validate_layers(layers, arch.num_layers)
         if not _is_int(rank) or rank < 1:
             raise ValueError(f"rank must be an integer >= 1, got {rank!r}")
         if not _is_int(seq_len) or seq_len < 2:
-            raise ValueError(f"seq_len must be an integer >= 2 for next-token loss, got {seq_len!r}")
+            raise ValueError(
+                f"seq_len must be an integer >= 2 for next-token loss, got {seq_len!r}"
+            )
         max_pos = getattr(arch, "max_position_embeddings", None)
         if max_pos is not None and seq_len > max_pos:
-            raise ValueError(f"seq_len={seq_len} exceeds the model's {max_pos} positions")
+            raise ValueError(
+                f"seq_len={seq_len} exceeds the model's {max_pos} positions"
+            )
         _require_positive("scale", scale)
         if not isinstance(activation, str) or activation not in _ACTIVATIONS:
-            raise ValueError(f"activation must be one of {sorted(_ACTIVATIONS)}, got {activation!r}")
+            raise ValueError(
+                f"activation must be one of {sorted(_ACTIVATIONS)}, got {activation!r}"
+            )
 
         self.sub, self.cfg, self.layers = substrate, cfg, layers
         self.rank, self.seq_len, self.scale = int(rank), int(seq_len), float(scale)
         self.hidden_size = int(arch.hidden_size)
-        self.vocab_size = int(arch.vocab_size)  # from the architecture: no probe forward pass
+        self.vocab_size = int(
+            arch.vocab_size
+        )  # from the architecture: no probe forward pass
         self._activation = _ACTIVATIONS[activation]()
         d, T, r, V = self.hidden_size, self.seq_len, self.rank, self.vocab_size
 
         use_base = cfg.lambda_kl > 0
         ids_node = IdentityNode(shape=(T,), name="ids")
-        h0_nodes = {l: IdentityNode(shape=(T, d), name=f"h0_{l}") for l in layers}
+        h0_nodes = {
+            layer: IdentityNode(shape=(T, d), name=f"h0_{layer}") for layer in layers
+        }
         z_nodes = {
-            l: Linear(
+            layer: Linear(
                 shape=(T, r),
-                name=f"z{l}",
+                name=f"z{layer}",
                 activation=_ACTIVATIONS[activation](),
                 energy=GaussianEnergy(precision=1.0 / cfg.sigma2),
                 use_bias=False,
                 weight_init=NormalInitializer(mean=0.0, std=cfg.predictor_init_std),
             )
-            for l in layers
+            for layer in layers
         }
         tail_node = make_frozen_tail(substrate)(
             shape=(T - 1, V),
@@ -190,12 +215,16 @@ class A3Model:
 
         nodes = [ids_node, *h0_nodes.values(), *z_nodes.values(), tail_node]
         edges = [Edge(source=ids_node, target=tail_node.slot("ids"))]
-        for l in layers:
+        for layer in layers:
             edges += [
-                Edge(source=h0_nodes[l], target=z_nodes[l]),
-                Edge(source=z_nodes[l], target=tail_node.slot("z")),
+                Edge(source=h0_nodes[layer], target=z_nodes[layer]),
+                Edge(source=z_nodes[layer], target=tail_node.slot("z")),
             ]
-        task = {"x": ids_node, "y": tail_node, **{f"h0_{l}": h0_nodes[l] for l in layers}}
+        task = {
+            "x": ids_node,
+            "y": tail_node,
+            **{f"h0_{layer}": h0_nodes[layer] for layer in layers},
+        }
         if use_base:
             base_node = IdentityNode(shape=(T - 1, V), name="base")
             nodes.append(base_node)
@@ -224,8 +253,11 @@ class A3Model:
     def adapter_params(self, params) -> dict[str, dict[str, jax.Array]]:
         """Parameters in stage A1's AdapterParams layout ({"layer_l": {"A", "B"}})."""
         return {
-            f"layer_{l}": {"A": self.predictor_weight(params, l), "B": self.projection(params, l)}
-            for l in self.layers
+            f"layer_{layer}": {
+                "A": self.predictor_weight(params, layer),
+                "B": self.projection(params, layer),
+            }
+            for layer in self.layers
         }
 
     # ------------------------------------------------------------------ step 1: cached states
@@ -247,7 +279,10 @@ class A3Model:
         clean = self.sub.run_with_interception(
             ids, modify_fn=identity_modify, intercept_layers=self.layers
         )
-        h0 = {l: jax.lax.stop_gradient(clean.hidden_state(l)) for l in self.layers}
+        h0 = {
+            layer: jax.lax.stop_gradient(clean.hidden_state(layer))
+            for layer in self.layers
+        }
         return h0, jax.lax.stop_gradient(clean.logits)
 
     def make_batch(
@@ -262,10 +297,12 @@ class A3Model:
         batch = {
             "x": ids,
             "y": ids[:, 1:],
-            **{f"h0_{l}": h0[l].astype(jnp.float32) for l in self.layers},
+            **{f"h0_{layer}": h0[layer].astype(jnp.float32) for layer in self.layers},
         }
         if self.cfg.lambda_kl > 0:
-            batch["base"] = jax.nn.log_softmax(base_logits[:, :-1].astype(jnp.float32), axis=-1)
+            batch["base"] = jax.nn.log_softmax(
+                base_logits[:, :-1].astype(jnp.float32), axis=-1
+            )
         return batch, h0, base_logits
 
     # ------------------------------------------------------------------ stale-state fix
@@ -288,12 +325,14 @@ class A3Model:
             if node.node_info.in_degree > 0
         )
 
-    def _final_terms(self, params, ids, base_logits, z_star, pred, n_pred) -> dict[str, jax.Array]:
+    def _final_terms(
+        self, params, ids, base_logits, z_star, pred, n_pred
+    ) -> dict[str, jax.Array]:
         """Exact terms at the final z through the substrate's loss API, per prediction.
 
         KL is taken over the same T - 1 positions as the tail, so ``energy`` is comparable
         with the refreshed graph energy."""
-        b = {l: self.projection(params, l) for l in self.layers}
+        b = {layer: self.projection(params, layer) for layer in self.layers}
         logits = self.sub.run_with_interception(
             ids,
             modify_fn=residual_modify(z_star, b, self.scale),
@@ -310,7 +349,10 @@ class A3Model:
             loss = ce + self.cfg.lambda_kl * kl
         gauss = {"precision": 1.0 / self.cfg.sigma2}
         spring = (
-            sum(jnp.sum(GaussianEnergy.energy(z_star[l], pred[l], gauss)) for l in self.layers)
+            sum(
+                jnp.sum(GaussianEnergy.energy(z_star[layer], pred[layer], gauss))
+                for layer in self.layers
+            )
             / n_pred
         )
         return {**terms, "loss": loss, "spring": spring, "energy": loss + spring}
@@ -329,17 +371,21 @@ class A3Model:
         clamps = build_clamps(batch, self.structure, clamp_target=True)
         n = grad_denominator(self.structure, clamps)
 
-        state = initialize_graph_state(self.structure, ids.shape[0], key, clamps, params=params)
-        state = self._refresh_state(params, state, clamps)            # energies at z^(0)
+        state = initialize_graph_state(
+            self.structure, ids.shape[0], key, clamps, params=params
+        )
+        state = self._refresh_state(params, state, clamps)  # energies at z^(0)
         energy_before = self.total_energy(state) / n
 
         state = run_inference(params, state, clamps, self.structure)  # K latent updates
-        state = self._refresh_state(params, state, clamps)            # energies at z^(K)
+        state = self._refresh_state(params, state, clamps)  # energies at z^(K)
         energy_after = self.total_energy(state) / n
 
         grads = pc_weight_gradients(params, state, self.structure, clamps)
-        z_star = {l: state.nodes[f"z{l}"].z_latent for l in self.layers}
-        pred = {l: state.nodes[f"z{l}"].z_mu for l in self.layers}  # f_phi(h0): independent of z
+        z_star = {layer: state.nodes[f"z{layer}"].z_latent for layer in self.layers}
+        pred = {
+            layer: state.nodes[f"z{layer}"].z_mu for layer in self.layers
+        }  # f_phi(h0): independent of z
 
         exact = self._final_terms(params, ids, base_logits, z_star, pred, n)
         energy_after_exact = exact.pop("energy")
@@ -354,7 +400,9 @@ class A3Model:
         }
         return grads, aux
 
-    def energy_curve(self, params, ids: jax.Array, key: jax.Array, steps: int | None = None):
+    def energy_curve(
+        self, params, ids: jax.Array, key: jax.Array, steps: int | None = None
+    ):
         """Graph energy per prediction at z^(0), z^(1), ..., z^(K). Eager diagnostic.
 
         Each point is refreshed at its own z, so the list has steps + 1 entries from exactly
@@ -377,17 +425,23 @@ class A3Model:
             state = type(inference).inference_step(
                 params, state, clamps, self.structure, inference.config
             )
-            state = self._refresh_state(params, state, clamps)  # energy at the updated z
+            state = self._refresh_state(
+                params, state, clamps
+            )  # energy at the updated z
             curve.append(float(self.total_energy(state)) / n)
         return curve
 
     # ------------------------------------------------------------------ deployment
-    def predict_latents(self, params, h0: Mapping[int, jax.Array]) -> dict[int, jax.Array]:
+    def predict_latents(
+        self, params, h0: Mapping[int, jax.Array]
+    ) -> dict[int, jax.Array]:
         """z_l = sigma(h0_l A_l): the predictor applied to the PRISTINE cached states."""
         a = self._activation
         return {
-            l: type(a).forward(h0[l] @ self.predictor_weight(params, l), a.config)
-            for l in self.layers
+            layer: type(a).forward(
+                h0[layer] @ self.predictor_weight(params, layer), a.config
+            )
+            for layer in self.layers
         }
 
     def deploy_logits(self, params, ids: jax.Array) -> tuple[jax.Array, jax.Array]:
@@ -396,7 +450,7 @@ class A3Model:
         ids = self._check_ids(ids)
         h0, base_logits = self.clean_pass(ids)
         z = self.predict_latents(params, h0)
-        b = {l: self.projection(params, l) for l in self.layers}
+        b = {layer: self.projection(params, layer) for layer in self.layers}
         logits = self.sub.run_with_interception(
             ids,
             modify_fn=residual_modify(z, b, self.scale),
